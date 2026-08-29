@@ -1,6 +1,6 @@
 # Pomodoro Attention Monitor
 
-A lightweight Pomodoro timer that uses the computer's camera to monitor user focus during study sessions.
+A lightweight Pomodoro timer i vibecoded because i was hella bored
 
 ## Features
 - Classic 25-minute Pomodoro session with 5-minute short break
