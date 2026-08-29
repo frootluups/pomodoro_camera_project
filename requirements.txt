@@ -1,0 +1,4 @@
+opencv-python==4.7.0.72
+numpy==1.24.0
+python-dateutil==2.8.1
+pillow>=10.0.0
