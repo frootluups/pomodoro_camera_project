@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pomodoro Camera — Focus Timer</title>
+    <meta name="description" content="Focus-aware Pomodoro timer with webcam tracking — TypeScript 7 web port" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+  </head>
+  <body>
+    <div id="app">
+      <!-- Top bar -->
+      <header class="topbar">
+        <div class="brand">🍅 Pomodoro Camera</div>
+        <div class="topbar-actions">
+          <button id="btn-start" class="btn btn-accent" aria-label="Start or pause timer">Start</button>
+          <button id="btn-reset" class="btn" aria-label="Reset timer">Reset</button>
+          <button id="btn-settings" class="btn" aria-label="Open settings">Settings</button>
+          <button id="btn-edit" class="btn btn-ghost" aria-label="Toggle layout edit mode">Edit Layout (E)</button>
+        </div>
+      </header>
+
+      <!-- Main stage: video + canvas overlay -->
+      <main class="stage">
+        <div class="stage-inner" id="stage-inner">
+          <video id="cam" autoplay playsinline muted></video>
+          <canvas id="overlay"></canvas>
+          <!-- HTML fallback overlays live inside #stage-inner as absolutely-positioned tiles -->
+          <div id="layout-layer"></div>
+        </div>
+        <div id="camera-off" class="camera-off hidden">
+          <div class="camera-off-card">Camera Off</div>
+          <p class="camera-off-hint">Enable camera in Settings to start focus tracking.</p>
+        </div>
+      </main>
+
+      <!-- Shortcuts hint -->
+      <footer class="hintbar">
+        <span><kbd>S</kbd> start/pause</span>
+        <span><kbd>E</kbd> edit layout</span>
+        <span><kbd>Esc</kbd> exit edit</span>
+        <span><kbd>Q</kbd> quit focus (pause)</span>
+      </footer>
+    </div>
+
+    <!-- Settings modal -->
+    <dialog id="settings-dialog" class="settings-dialog">
+      <form method="dialog" class="settings-form">
+        <div class="settings-header">
+          <h2>Settings</h2>
+          <button type="submit" value="close" class="btn btn-small" aria-label="Close settings">Close</button>
+        </div>
+
+        <div class="settings-grid">
+          <label class="field">
+            <span>Pomodoro (min)</span>
+            <span class="stepper">
+              <button type="button" data-action="pom-minus" class="btn btn-small">−</button>
+              <output id="out-pom">25</output>
+              <button type="button" data-action="pom-plus" class="btn btn-small">+</button>
+            </span>
+          </label>
+
+          <label class="field">
+            <span>Break (min)</span>
+            <span class="stepper">
+              <button type="button" data-action="break-minus" class="btn btn-small">−</button>
+              <output id="out-break">5</output>
+              <button type="button" data-action="break-plus" class="btn btn-small">+</button>
+            </span>
+          </label>
+
+          <label class="field">
+            <span>UI Scale</span>
+            <span class="stepper">
+              <button type="button" data-action="scale-minus" class="btn btn-small">−</button>
+              <output id="out-scale">82%</output>
+              <button type="button" data-action="scale-plus" class="btn btn-small">+</button>
+            </span>
+          </label>
+
+          <div class="field row">
+            <button type="button" data-action="toggle-camera" id="btn-toggle-camera" class="btn btn-small">Camera: On</button>
+            <button type="button" data-action="toggle-bar" id="btn-toggle-bar" class="btn btn-small">Bar: On</button>
+            <button type="button" data-action="toggle-alerts" id="btn-toggle-alerts" class="btn btn-small">Alerts: On</button>
+          </div>
+
+          <div class="field row">
+            <button type="button" data-action="toggle-theme" id="btn-toggle-theme" class="btn btn-small">Theme: Dark</button>
+            <button type="button" data-action="toggle-corners" id="btn-toggle-corners" class="btn btn-small">Corners: Rounded</button>
+          </div>
+
+          <div class="field">
+            <span>Display mode</span>
+            <div class="row">
+              <button type="button" data-action="mode-progress" class="btn btn-small">Progress</button>
+              <button type="button" data-action="mode-popup" class="btn btn-small">Popup</button>
+              <button type="button" data-action="mode-both" class="btn btn-small">Both</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <span>Layout tiles</span>
+            <div class="row">
+              <button type="button" data-action="layout-timer" class="btn btn-small">Timer</button>
+              <button type="button" data-action="layout-bar" class="btn btn-small">Bar</button>
+              <button type="button" data-action="layout-focus" class="btn btn-small">Focus</button>
+              <button type="button" data-action="layout-phase" class="btn btn-small">Phase</button>
+            </div>
+          </div>
+
+          <div class="field row">
+            <button type="button" data-action="layout-preset" class="btn btn-small">Presets</button>
+            <button type="button" data-action="layout-reset" class="btn btn-small">Default</button>
+            <button type="button" data-action="layout-grid" class="btn btn-small" id="btn-grid">Grid: 12×8</button>
+          </div>
+        </div>
+
+        <div class="settings-footer">
+          <button type="button" data-action="layout-edit" class="btn btn-accent">Layout Edit Mode</button>
+        </div>
+      </form>
+    </dialog>
+
+    <!-- Onboarding overlay (HTML, mirrors Python's 6-step card) -->
+    <div id="onboarding" class="onboarding hidden" role="dialog" aria-modal="true">
+      <div class="onboarding-card">
+        <div id="onboarding-bar" class="onboarding-bar"></div>
+        <h2 id="onboarding-title">Welcome</h2>
+        <p id="onboarding-body"></p>
+        <div class="onboarding-dots" id="onboarding-dots"></div>
+        <div class="onboarding-actions">
+          <button id="onboarding-back" class="btn">Back</button>
+          <button id="onboarding-skip" class="btn btn-ghost">Skip</button>
+          <button id="onboarding-next" class="btn btn-accent">Next</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

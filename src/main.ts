@@ -1,0 +1,49 @@
+// src/main.ts — entrypoint (browser). Mirrors main.py:main()
+import "./style.css";
+import { PomodoroApp } from "./app.ts";
+
+function qs<T extends HTMLElement>(sel: string): T {
+  const el = document.querySelector(sel);
+  if (!el) throw new Error(`Missing element: ${sel}`);
+  return el as T;
+}
+
+async function boot(): Promise<void> {
+  const video = qs<HTMLVideoElement>("#cam");
+  const canvas = qs<HTMLCanvasElement>("#overlay");
+  const stageInner = qs<HTMLElement>("#stage-inner");
+  const layoutLayer = qs<HTMLElement>("#layout-layer");
+  const cameraOffEl = qs<HTMLElement>("#camera-off");
+  const settingsDialog = qs<HTMLDialogElement>("#settings-dialog");
+  const onboardingEl = qs<HTMLElement>("#onboarding");
+
+  // DPI-aware canvas size
+  function sizeCanvas(): void {
+    const r = stageInner.getBoundingClientRect();
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    canvas.width = Math.max(320, Math.round(r.width * dpr));
+    canvas.height = Math.max(240, Math.round(r.height * dpr));
+    // CSS size stays via width:100% height:100% (stageInner controls)
+    const ctx = canvas.getContext("2d");
+    if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  }
+  sizeCanvas();
+  window.addEventListener("resize", sizeCanvas);
+
+  const app = new PomodoroApp({ video, canvas, stageInner, layoutLayer, cameraOffEl, settingsDialog, onboardingEl });
+
+  // Handle camera permission prompt early so overlay sizes correctly
+  await app.run();
+
+  // expose for debugging / parity with Python console logs
+  (window as unknown as { pomodoroApp: PomodoroApp }).pomodoroApp = app;
+  console.info("Pomodoro Camera (web) started — press S to start, E to edit, Q to pause.");
+}
+
+boot().catch((e) => {
+  console.error(e);
+  const el = document.createElement("pre");
+  el.textContent = String(e?.stack ?? e);
+  el.style.cssText = "position:fixed;inset:12px;background:#1e1e22;color:#ff8a8a;padding:12px;border-radius:12px;z-index:9999;overflow:auto";
+  document.body.appendChild(el);
+});

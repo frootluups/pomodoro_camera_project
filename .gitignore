@@ -1,0 +1,23 @@
+# generated at runtime
+layout.json
+settings.json
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# web / TypeScript 7
+node_modules/
+dist/
+.npm/
+vite.svg
+*.tsbuildinfo

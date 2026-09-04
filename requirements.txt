@@ -1,4 +1,10 @@
-opencv-python==4.7.0.72
-numpy==1.24.0
-python-dateutil==2.8.1
+# Core runtime — opencv 5.x removed CascadeClassifier, so pin <5 for Haar tracking
+opencv-python>=4.10.0,<5
+numpy>=1.24.0,<3
 pillow>=10.0.0
+python-dateutil>=2.8.0
+
+# Dev / quality (install with `pip install -r requirements-dev.txt` if you split)
+# ruff>=0.4.0
+# black>=24.0
+# pytest>=8.0

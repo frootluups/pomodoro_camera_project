@@ -1,0 +1,21 @@
+{
+  "name": "pomodoro-camera-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Focus-aware Pomodoro timer — browser-native TypeScript 7 port of the OpenCV Python app",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
+    "@tensorflow-models/blazeface": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vite": "^6.3.5"
+  }
+}

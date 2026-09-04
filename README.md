@@ -1,58 +1,155 @@
-# Pomodoro Attention Monitor
+# Pomodoro Camera
 
-A lightweight Pomodoro timer i vibecoded because i was hella bored
+Focus-aware Pomodoro timer in a single OpenCV window. Combines a 25/5 timer with webcam face/motion tracking, draggable layout editing, TrueType text, and three themes (dark / light / Windows XP Luna).
+
+*A lightweight Pomodoro timer i vibecoded because i was hella bored — now ported to website-friendly TypeScript 7 (Vite).*
+
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue) ![TypeScript](https://img.shields.io/badge/typescript-7-blue) ![Vite](https://img.shields.io/badge/vite-6-646CFF) ![OpenCV](https://img.shields.io/badge/opencv-%3E%3D4.10-green) ![License MIT](https://img.shields.io/badge/license-MIT-lightgrey)
 
 ## Features
-- Classic 25-minute Pomodoro session with 5-minute short break
-- Real-time attention monitoring using webcam
-- Focus score based on color analysis in video frames (red, green, blue)
-- Visual feedback showing focus level
-- Simple command-line interface
 
-## Setup
-1. Create and activate a virtual environment:
-   ```bash
-   python -m venv .venv
-   .venv\Scripts\activate
-   ```
+- **Pomodoro engine** — 25 min work → 5 min break, auto flip, pause/resume/reset
+- **Camera focus scoring** — Haar face detection (every 3rd frame) + motion diff → 0-100 score → `concentrated / neutral / slacking`
+- **Face tracking outline** — smoothed, color-coded corner-bracket box with `SLACKING` tag
+- **Slacking alerts** — pulsing banner + window border + beep (throttled, toggle in Settings)
+- **TrueType text** — Segoe UI via Pillow, Hershey fallback, cached sizing, binary-search `fit_text`
+- **Layout system** — 12×8 grid, top-left cells, drag-and-drop edit (`E` / `Esc`), presets (Default / Focus / Dashboard / Minimal), `layout.json` persistence
+- **Themes** — `dark` / `light` / `xp` (Luna beveled buttons, gradient title bars, chunky progress)
+- **Onboarding** — 6-step first-run intro (dim + highlight + card), `Next / Back / Skip`, persists via `settings.json`
+- **Settings panel** — centered modal: pomodoro/break steppers, camera/bar toggles, theme/corners/alerts, display mode, UI scale (0.6–1.4), grid/layout actions
+- **Web build** — Vite + TypeScript 7, `<video>` + `<canvas>`, `FaceDetector` → `BlazeFace` fallback, `localStorage` persistence
 
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
+## Quick start
 
-3. Run the application:
-   ```bash
-   python main.py
-   ```
+### Python (OpenCV window)
 
-## Usage
-- Start a session with `main.py` after running the script
-- Press 'q' to quit during video feed
-- Focus score is displayed in real-time (0-100 scale)
-- Session ends when time elapses or user presses 'q'
+```bash
+python -m venv .venv
+# Windows
+.venv\Scripts\activate
+# macOS/Linux
+source .venv/bin/activate
 
-## How it works
-- Uses OpenCV to access webcam and capture video frames
-- Analyzes each frame for focus indicators using color analysis
-- Focus score is calculated based on presence of red, green, and blue colors in the frame
-- Displays focus score on screen with visual feedback
-- Automatically switches between pomodoro and short break phases
+pip install -r requirements.txt
+python main.py
+```
 
-## Limitations
-- Simple color-based focus detection (not actual attention tracking)
-- Accuracy depends on user's environment and lighting conditions
-- May not work well in low-light or dark environments
-- Does not detect actual user behavior or cognitive state
+Or as installed script (after `pip install -e .` with `pyproject.toml`):
+
+```bash
+pomodoro-camera
+```
+
+### Web (TypeScript 7 + Vite)
+
+```bash
+npm install
+npm run dev      # http://localhost:5173
+npm run build    # -> dist/
+npm run preview
+```
+
+Requires Node 20+. Camera needs HTTPS or `localhost`.
+
+## Controls
+
+| Key | Action |
+|---|---|
+| `S` | start / pause timer |
+| `E` | toggle layout edit mode |
+| `Esc` | exit edit mode (also skip onboarding) |
+| `Q` / window `X` | quit |
+| `Enter` / `Space` | onboarding next |
+| `Backspace` | onboarding back |
+| mouse drag | move tiles in edit mode; click `[ Done ]` to save |
+
+## Persistence
+
+- `layout.json` / `localStorage:pomodoro.layout.v1` — grid positions for `timer_popup`, `phase_label`, `progress_bar`, `focus_display`, `status_display`, `main_buttons`, `quit_hint`; auto-created, merged on update, healed if corrupt
+- `settings.json` / `localStorage:pomodoro.settings.v1` — `ui_scale`, `theme`, `corner_style`, `alerts_enabled`; written on change / onboarding finish
+
+Delete either file (or clear localStorage) to reset to defaults.
+
+## Architecture
+
+```
+main.py:2762 lines — single-file, sectioned backend
+  ├─ constants & StrEnum (Phase, ThemeName, FocusState, CornerStyle, DisplayMode)
+  ├─ FontEngine (Pillow + Hershey, LRU-cached text_size / fit_text, numpy gradients)
+  ├─ Layout (UIElementConfig, LayoutConfig, LayoutManager — grid → pixel rects)
+  ├─ Rendering (styled_rect, _h/_v_gradient, _xp_button/title/progress)
+  ├─ OnboardingManager (6 steps, _card_rects hit-test, draw_overlay)
+  ├─ ButtonHandler (layout-driven hit-test)
+  └─ PomodoroTimer
+       ├─ timer state machine (_update_timer, switch_*)
+       ├─ vision (analyze_focus — face every 3rd frame, motion penalty)
+       ├─ rendering (_draw_ui → _draw_* helpers, theme-aware)
+       ├─ I/O (camera via VideoCapture, window loop, persistence)
+       └─ main() entrypoint
+
+src/ (TypeScript 7): Vite web port — mirrors Python modules
+  ├─ constants.ts, types.ts, theme.ts
+  ├─ tracker.ts (MultiPersonTracker), gallery.ts (FaceGallery)
+  ├─ layout.ts (LayoutManager + localStorage), render.ts (Canvas 2D)
+  ├─ vision.ts (FaceDetector/BlazeFace + motion), pomodoro.ts (state machine)
+  ├─ app.ts (camera, canvas loop, drag, settings, onboarding)
+  └─ main.ts (boot)
+```
+
+Hot-path notes (see `main.py:91-179`, `main.py:365-532`):
+
+- `text_size` cached (≤2048 entries), `fit_text` cached (≤1024), Pillow font cache
+- `_h_gradient` / `_v_gradient` numpy-vectorized (`linspace` + outer)
+- `_xp_button` single-pass gradient fill
+- `analyze_focus` skips Haar cascade 2/3 frames, reuses `last_faces`
+
+## Performance
+
+Measured on 640×480 canvas, 30-frame average (`python -c "from main import PomodoroTimer ..."`):
+
+- XP theme ~3.5 ms / frame (~285 FPS)
+- Dark theme ~3.5 ms / frame (~290 FPS)
+- 72-combo matrix (3 sizes × 3 themes × 2 corners × 4 states) — all clean
+
+## Configuration
+
+Pass custom durations / mode programmatically:
+
+```python
+from main import PomodoroTimer, DisplayMode
+t = PomodoroTimer(session_duration_minutes=30, break_duration_minutes=10, display_mode=DisplayMode.BOTH)
+t.start_session()
+```
+
+## Requirements
+
+- Python 3.11+
+- `opencv-python>=4.10.0` (provides `cv2.data.haarcascades`), `numpy>=1.24,<3`, `pillow>=10`, `python-dateutil>=2.8`
+- Windows: `segoeui.ttf` from `C:\Windows\Fonts` auto-detected; other platforms fall back to DejaVu/Arial
+- Optional: `winsound` (Windows) for beeps, otherwise `\a` bell
+- Web: Node 20+, modern browser with `getUserMedia`
+
+## Tests
+
+```bash
+pytest -q
+# or quick render-matrix smoke test:
+python -c "import tests.test_render; tests.test_render.test_matrix()"
+```
+
+See `tests/test_render.py` and `tests/test_layout.py`.
 
 ## Future Improvements
-- Implement advanced face recognition for actual attention analysis
-- Add audio-based focus detection
-- Include machine learning models for attention prediction
-- Support for multiple cameras
-- More sophisticated focus indicators (eye movement, blink rate, etc.)
-- User profile and habit tracking
-- Social sharing of study progress
-- Integration with calendar or task management tools
-- Mobile app version with notifications
-- Cross-platform support (Windows, macOS, Linux)
+
+- Advanced face recognition re-ID (SFace/gallery already stubbed in `gallery.ts`)
+- Audio-based focus detection
+- ML attention prediction, eye movement / blink rate
+- Multiple cameras, user profiles / habit tracking
+- Calendar / task integration, mobile app, cross-platform polish
+
+## Troubleshooting
+
+- `numpy.core.multiarray failed to import` / `_ARRAY_API not found` → upgrade OpenCV: `pip install -U "opencv-python>=4.10"`
+- Camera not opening → close other apps using webcam, check `cv2.VideoCapture(0)`; toggle `Camera: Off/On` in Settings (web: check `getUserMedia` permission)
+- Layout broken after manual edit → delete `layout.json` and restart (web: clear localStorage)
+- No Pillow → installs Hershey fallback; `pip install pillow` for Segoe UI
