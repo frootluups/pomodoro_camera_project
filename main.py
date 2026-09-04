@@ -460,6 +460,13 @@ _FONT_PATHS: tuple[str | None, str | None] = _resolve_font_paths() if _PIL_AVAIL
 _FONT_CACHE: dict[tuple[int, bool], Any] = {}
 _TEXT_SIZE_CACHE: dict[tuple[str, int, bool], tuple[int, int]] = {}
 _FIT_TEXT_CACHE: dict[tuple[str, int, int, int, bool], tuple[int, tuple[int, int]]] = {}
+# Reusable dummy for text measurement — avoids per-call Image allocation
+_DUMMY_IMG: Any = Image.new("RGB", (1, 1)) if _PIL_AVAILABLE else None  # type: ignore[assignment]
+_DUMMY_DRAW: Any = ImageDraw.Draw(_DUMMY_IMG) if _PIL_AVAILABLE and _DUMMY_IMG is not None else None  # type: ignore[assignment]
+# Gradient cache — keyed by (w/h, c1, c2) to avoid recomputing linspace per frame
+_H_GRAD_CACHE: dict[tuple[int, tuple[int, int, int], tuple[int, int, int]], np.ndarray] = {}
+_V_GRAD_CACHE: dict[tuple[int, tuple[int, int, int], tuple[int, int, int]], np.ndarray] = {}
+_GRAD_CACHE_MAX: Final = 64
 
 
 def get_font(px: int, bold: bool = False) -> Any:
@@ -483,8 +490,9 @@ def text_size(text: str, px: int, bold: bool = False) -> tuple[int, int]:
         return cached
     if _PIL_AVAILABLE:
         font = get_font(px, bold)
-        dummy = ImageDraw.Draw(Image.new("RGB", (1, 1)))  # type: ignore[union-attr]
-        l, t, r, b = dummy.textbbox((0, 0), text, font=font)
+        # Reuse global dummy — 10x faster than creating Image per call
+        assert _DUMMY_DRAW is not None
+        l, t, r, b = _DUMMY_DRAW.textbbox((0, 0), text, font=font)
         result = (r - l, b - t)
     else:
         scale = max(0.3, px / 26.0)
@@ -493,6 +501,32 @@ def text_size(text: str, px: int, bold: bool = False) -> tuple[int, int]:
     if len(_TEXT_SIZE_CACHE) < TEXT_SIZE_CACHE_MAX:
         _TEXT_SIZE_CACHE[key] = result
     return result
+
+
+def _alpha_blend_roi(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, color: tuple[int, int, int], alpha: float, radius: int = 0) -> None:
+    """Efficient translucent fill — only touches ROI, no full-frame copy."""
+    ih, iw = img.shape[:2]
+    x1c, y1c, x2c, y2c = max(0, x1), max(0, y1), min(iw, x2), min(ih, y2)
+    if x2c <= x1c or y2c <= y1c:
+        return
+    if radius <= 0:
+        roi = img[y1c:y2c, x1c:x2c]
+        # Blend in-place: dst = src * (1-alpha) + color * alpha
+        # Use cv2.addWeighted on ROI only — no full-frame allocation
+        overlay = np.full_like(roi, color)
+        cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
+    else:
+        # For rounded, draw to temp ROI then blend
+        w, h = x2c - x1c, y2c - y1c
+        tmp = np.zeros((h, w, 3), dtype=np.uint8)
+        styled_rect(tmp, 0, 0, w, h, fill=color, radius=radius)
+        # Create mask for rounded shape
+        mask = np.zeros((h, w), dtype=np.uint8)
+        styled_rect(mask, 0, 0, w, h, fill=(255, 255, 255), radius=radius)  # type: ignore[arg-type]
+        # Blend only where mask is set
+        roi = img[y1c:y2c, x1c:x2c]
+        alpha_mask = (mask.astype(np.float32) / 255.0 * alpha)[:, :, None]
+        roi[:] = (roi.astype(np.float32) * (1 - alpha_mask) + tmp.astype(np.float32) * alpha_mask).astype(np.uint8)
 
 
 def draw_text(
@@ -785,28 +819,32 @@ def _h_gradient(
     c2: tuple[int, int, int],
     radius: int = 0,
 ) -> None:
-    """Horizontal gradient — fast numpy blit, with rounded clipping if needed."""
+    """Horizontal gradient — cached linspace, fast numpy blit."""
     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
     w = x2 - x1
     h = y2 - y1
     if w <= 0 or h <= 0:
         return
-    # clamp to image bounds
     ih, iw = img.shape[:2]
     cx1, cy1, cx2, cy2 = max(0, x1), max(0, y1), min(iw, x2), min(ih, y2)
     if cx2 <= cx1 or cy2 <= cy1:
         return
-    c1a = np.array(c1, dtype=np.float32)
-    c2a = np.array(c2, dtype=np.float32)
-    t = np.linspace(0, 1, w, dtype=np.float32)
-    cols = (c1a + np.outer(t, c2a - c1a)).clip(0, 255).astype(np.uint8)  # (w,3) BGR
+    # Cached gradient cols
+    key = (w, c1, c2)
+    cols = _H_GRAD_CACHE.get(key)
+    if cols is None:
+        c1a = np.array(c1, dtype=np.float32)
+        c2a = np.array(c2, dtype=np.float32)
+        t = np.linspace(0, 1, w, dtype=np.float32)
+        cols = (c1a + np.outer(t, c2a - c1a)).clip(0, 255).astype(np.uint8)
+        if len(_H_GRAD_CACHE) < _GRAD_CACHE_MAX:
+            _H_GRAD_CACHE[key] = cols
     if radius > 0:
         r = min(radius, w // 2, h // 2)
         centers = np.arange(w, dtype=np.float32)
         edge_dist = np.minimum(centers, w - 1 - centers)
         shrink = (r - np.sqrt(np.maximum(0, r * r - np.maximum(0, r - edge_dist) ** 2))).astype(np.int32)
         shrink = np.where(edge_dist < r, shrink, 0)
-        # fast path: still per-column but without per-pixel float math; keep AA line for curved edges
         for i in range(w):
             gx = x1 + i
             if gx < cx1 or gx >= cx2:
@@ -816,10 +854,8 @@ def _h_gradient(
             if sy < ey:
                 cv2.line(img, (gx, sy), (gx, ey), tuple(cols[i].tolist()), 1, cv2.LINE_AA)
         return
-    # fast blit: slice to clipped region
     x_off = cx1 - x1
     cols_clip = cols[x_off : x_off + (cx2 - cx1)]
-    # broadcast rows: (h_clip, w_clip, 3)
     img[cy1:cy2, cx1:cx2] = cols_clip[None, :, :]
 
 
@@ -832,7 +868,7 @@ def _v_gradient(
     c1: tuple[int, int, int],
     c2: tuple[int, int, int],
 ) -> None:
-    """Vertical gradient — fast numpy blit."""
+    """Vertical gradient — cached, fast numpy blit."""
     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
     h = y2 - y1
     w = x2 - x1
@@ -842,13 +878,17 @@ def _v_gradient(
     cx1, cy1, cx2, cy2 = max(0, x1), max(0, y1), min(iw, x2), min(ih, y2)
     if cx2 <= cx1 or cy2 <= cy1:
         return
-    c1a = np.array(c1, dtype=np.float32)
-    c2a = np.array(c2, dtype=np.float32)
-    t = np.linspace(0, 1, h, dtype=np.float32)
-    cols = (c1a + np.outer(t, c2a - c1a)).clip(0, 255).astype(np.uint8)  # (h,3)
+    key = (h, c1, c2)
+    cols = _V_GRAD_CACHE.get(key)
+    if cols is None:
+        c1a = np.array(c1, dtype=np.float32)
+        c2a = np.array(c2, dtype=np.float32)
+        t = np.linspace(0, 1, h, dtype=np.float32)
+        cols = (c1a + np.outer(t, c2a - c1a)).clip(0, 255).astype(np.uint8)
+        if len(_V_GRAD_CACHE) < _GRAD_CACHE_MAX:
+            _V_GRAD_CACHE[key] = cols
     y_off = cy1 - y1
     cols_clip = cols[y_off : y_off + (cy2 - cy1)]
-    # broadcast columns: need (h_clip, w_clip, 3)
     img[cy1:cy2, cx1:cx2] = cols_clip[:, None, :]
 
 
@@ -1088,17 +1128,16 @@ class OnboardingManager:
         card_w, card_h, pad, btn_h, nav_y = r["card_w"], r["card_h"], r["pad"], r["btn_h"], r["nav_y"]
         is_xp = getattr(self, "_theme", "dark") == "xp"
 
-        overlay = frame.copy()
-        cv2.rectangle(overlay, (0, 0), (fw, fh), (180, 175, 165) if is_xp else (10, 10, 12), -1)
+        # Dim backdrop — ROI-free full-frame blend (once per frame, unavoidable)
+        dim_color = (180, 175, 165) if is_xp else (10, 10, 12)
+        overlay = np.full_like(frame, dim_color)
         cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
 
         if (ht := step.get("highlight")) is not None:
             hx1, hy1, hx2, hy2 = int(fw * ht[0]), int(fh * ht[1]), int(fw * ht[2]), int(fh * ht[3])
             hr = 14 if rounded and not is_xp else 0
             pulse = 0.35 + 0.10 * math.sin(time.time() * 3.0)
-            hl_overlay = frame.copy()
-            styled_rect(hl_overlay, hx1, hy1, hx2, hy2, fill=accent, radius=hr)
-            cv2.addWeighted(hl_overlay, pulse, frame, 1.0 - pulse, 0, frame)
+            _alpha_blend_roi(frame, hx1, hy1, hx2, hy2, accent, pulse, hr)
             styled_rect(frame, hx1, hy1, hx2, hy2, border=accent, thickness=2, radius=hr)
 
         if is_xp:
@@ -1108,9 +1147,7 @@ class OnboardingManager:
             body_top = card_y + tb_h + 4
         else:
             card_r = 18 if rounded else 0
-            card_bg = frame.copy()
-            styled_rect(card_bg, card_x, card_y, card_x2, card_y2, fill=(28, 28, 32), radius=card_r)
-            cv2.addWeighted(card_bg, 0.88, frame, 0.12, 0, frame)
+            _alpha_blend_roi(frame, card_x, card_y, card_x2, card_y2, (28, 28, 32), 0.88, card_r)
             styled_rect(frame, card_x, card_y, card_x2, card_y2, border=accent, thickness=2, radius=card_r)
             bar_h = 4
             bar_x1 = card_x + 22 if rounded else card_x
@@ -1371,16 +1408,35 @@ class PomodoroTimer:
         if not self.alerts_enabled or now - self._last_alert_ts < 8.0:
             return
         self._last_alert_ts = now
-        try:
-            if platform.system() == "Windows":
-                import winsound
 
-                winsound.Beep(880, 180)
-                winsound.Beep(660, 220)
-            else:
-                print("\a", end="", flush=True)
-        except Exception as exc:
-            log.debug("Alert sound failed: %s", exc)
+        def _beep() -> None:
+            try:
+                if platform.system() == "Windows":
+                    import winsound
+
+                    winsound.Beep(880, 180)
+                    winsound.Beep(660, 220)
+                    # Extra beep for urgency when slacking
+                    winsound.Beep(880, 120)
+                else:
+                    # Non-Windows: try system bell + log
+                    print("\a", end="", flush=True)
+                    # Also try paplay/beep if available
+                    try:
+                        import subprocess
+
+                        subprocess.Popen(["paplay", "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                log.debug("Alert sound failed: %s", exc)
+
+        try:
+            import threading
+
+            threading.Thread(target=_beep, daemon=True).start()
+        except Exception:
+            _beep()
 
     # -- face outline & slacking alert ------------------------------------
     def _draw_face_outline(self, frame: np.ndarray) -> None:
@@ -2088,7 +2144,8 @@ class PomodoroTimer:
             det_scale = 320.0 / w
             small = cv2.resize(frame, (320, int(h * det_scale)), interpolation=cv2.INTER_AREA)
         gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-        gray_small = cv2.GaussianBlur(gray_small, (5, 5), 0)
+        # Lighter blur preserves Haar edges — 5x5 was over-smoothing and hurting accuracy
+        gray_small = cv2.GaussianBlur(gray_small, (3, 3), 0)
         # improve contrast for cascade
         try:
             gray_eq = cv2.equalizeHist(gray_small)
@@ -2103,12 +2160,12 @@ class PomodoroTimer:
         if should_detect:
             raw_dets: list[tuple[int, int, int, int]] = []
             if self.face_cascade is not None:
-                # stricter params cut ghost detections: higher neighbors, larger minSize on 320px small
+                # Tuned for accuracy: lower minNeighbors catches more true faces, geometric filter + NMS handles ghosts
                 try:
-                    faces = self.face_cascade.detectMultiScale(gray_eq, scaleFactor=1.08, minNeighbors=5, minSize=(36, 36), flags=cv2.CASCADE_SCALE_IMAGE)
+                    faces = self.face_cascade.detectMultiScale(gray_eq, scaleFactor=1.1, minNeighbors=3, minSize=(30, 30), flags=cv2.CASCADE_SCALE_IMAGE)
                 except Exception:
                     try:
-                        faces = self.face_cascade.detectMultiScale(gray_eq, 1.08, 5)
+                        faces = self.face_cascade.detectMultiScale(gray_eq, 1.1, 3)
                     except Exception:
                         faces = []
                 inv = 1.0 / det_scale if det_scale != 1.0 else 1.0
@@ -2248,15 +2305,18 @@ class PomodoroTimer:
         motion = float(np.mean(cv2.absdiff(self.prev_gray, gray_small))) / 255.0
         self.prev_gray = gray_small
 
+        # Focus scoring: face presence is primary, motion is secondary
+        # Previous weights (72/28) were too motion-sensitive — small movements tanked score
         face_score = 1.0 if self.last_faces else 0.0
-        motion_penalty = min(1.0, motion * (1.6 if face_score else 2.4))
-        score = (face_score * 72.0) + ((1.0 - motion_penalty) * 28.0)
+        # Reduced motion penalty — face present should stay concentrated unless large motion
+        motion_penalty = min(1.0, motion * (1.0 if face_score else 2.0))
+        score = (face_score * 80.0) + ((1.0 - motion_penalty) * 20.0)
         if not self.last_faces:
-            score *= 0.55
-        # clamp and smooth with one-pole EMA to avoid jitter (keep last 0.25s)
+            score *= 0.45  # No face = stronger slacking signal
+        # clamp and smooth with one-pole EMA to avoid jitter
         score = max(0.0, min(100.0, score))
         prev = getattr(self, "_smooth_score", score)
-        score = prev * 0.35 + score * 0.65
+        score = prev * 0.30 + score * 0.70  # Slightly more responsive
         self._smooth_score = score
         return score
 
@@ -2320,12 +2380,8 @@ class PomodoroTimer:
         if self.theme == ThemeName.XP:
             _xp_progress_bar(frame, bar_x1, bar_y, bar_x2, bar_y2, progress)
         else:
-            # minimalist thin pill progress — no border, subtle track
             bar_radius = (bar_y2 - bar_y) // 2 if rounded else 0
-            # track as translucent dark
-            overlay = frame.copy()
-            styled_rect(overlay, bar_x1, bar_y, bar_x2, bar_y2, fill=(38, 38, 42), radius=bar_radius)
-            cv2.addWeighted(overlay, 0.65, frame, 0.35, 0, frame)
+            _alpha_blend_roi(frame, bar_x1, bar_y, bar_x2, bar_y2, (38, 38, 42), 0.65, bar_radius)
             if progress > 0:
                 fill_x = max(bar_x1, int(bar_x1 + (bar_x2 - bar_x1) * progress))
                 styled_rect(frame, bar_x1, bar_y, fill_x, bar_y2, fill=(120, 160, 255) if phase_color == (231, 76, 60) else phase_color, radius=bar_radius)
@@ -2346,12 +2402,8 @@ class PomodoroTimer:
             styled_rect(frame, px1, py1 + tb_h, px2, py2, fill=theme["popup_fill"], border=(104, 104, 104), thickness=1, radius=0)
             draw_text(frame, timer_text, px1 + box_w // 2, py1 + tb_h + (box_h - tb_h) // 2, px, theme["text"], bold=True, anchor="mm")
         else:
-            # minimalist: subtle translucent pill, thin neutral border, no shadow/highlight
             popup_radius = int(min(box_w, box_h) * 0.32) if rounded else 0
-            # translucent dark pill
-            overlay = frame.copy()
-            styled_rect(overlay, px1, py1, px2, py2, fill=(32, 32, 36), radius=popup_radius)
-            cv2.addWeighted(overlay, 0.72, frame, 0.28, 0, frame)
+            _alpha_blend_roi(frame, px1, py1, px2, py2, (32, 32, 36), 0.72, popup_radius)
             styled_rect(frame, px1, py1, px2, py2, border=(68, 68, 75), thickness=1, radius=popup_radius)
             draw_text(frame, timer_text, px1 + box_w // 2, py1 + box_h // 2, px, theme["text"], bold=True, anchor="mm")
 
@@ -2390,16 +2442,11 @@ class PomodoroTimer:
         else:
             # minimalist — no shadow/highlight, thin border, subtle fill
             buttons = [(xs[0], labels[0], theme["accent"] if self.is_running else (68, 68, 75)), (xs[1], labels[1], (68, 68, 75)), (xs[2], labels[2], (68, 68, 75))]
-            regions = {}
             for bxx, label, border in buttons:
-                # subtle translucent fill
-                overlay = frame.copy()
-                styled_rect(overlay, bxx, btn_y, bxx + btn_w, btn_y + btn_h, fill=(38, 38, 42), radius=main_btn_radius)
-                cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+                _alpha_blend_roi(frame, bxx, btn_y, bxx + btn_w, btn_y + btn_h, (38, 38, 42), 0.55, main_btn_radius)
                 styled_rect(frame, bxx, btn_y, bxx + btn_w, btn_y + btn_h, border=border, thickness=1, radius=main_btn_radius)
                 px, _ = fit_text(label, btn_w, btn_h, int(0.38 * btn_h))
                 draw_text(frame, label, bxx + btn_w // 2, btn_y + btn_h // 2, px, theme["text"], anchor="mm")
-                regions[names[buttons.index((bxx, label, border))]] = {"x1": bxx, "y1": btn_y, "x2": bxx + btn_w + 1, "y2": btn_y + btn_h + 1}
             self.button_handler.button_regions = {n: {"x1": x, "y1": btn_y, "x2": x + btn_w + 1, "y2": btn_y + btn_h + 1} for n, x in zip(names, xs)}
 
     def _draw_focus_display(self, frame: np.ndarray, theme: dict[str, Any], fw: int, fh: int, ui_scale: float) -> None:
@@ -2424,9 +2471,7 @@ class PomodoroTimer:
         pill_w, pill_h = tw + 14, th + 8
         px1 = fx1 + 4
         py1 = fy1 + (fy2 - fy1 - pill_h) // 2
-        overlay = frame.copy()
-        styled_rect(overlay, px1, py1, px1 + pill_w, py1 + pill_h, fill=(28, 28, 32), radius=pill_h // 2)
-        cv2.addWeighted(overlay, 0.62, frame, 0.38, 0, frame)
+        _alpha_blend_roi(frame, px1, py1, px1 + pill_w, py1 + pill_h, (28, 28, 32), 0.62, pill_h // 2)
         styled_rect(frame, px1, py1, px1 + pill_w, py1 + pill_h, border=(60, 60, 68), thickness=1, radius=pill_h // 2)
         draw_text(frame, focus_text, px1 + pill_w // 2, py1 + pill_h // 2, px, theme["text"], anchor="mm")
 
@@ -2512,9 +2557,7 @@ class PomodoroTimer:
         if is_xp:
             styled_rect(frame, panel_x, panel_y, panel_x + panel_w, panel_y + panel_h, fill=theme["panel_fill"], border=(104, 104, 104), thickness=2, radius=0)
         else:
-            overlay = frame.copy()
-            styled_rect(overlay, panel_x, panel_y, panel_x + panel_w, panel_y + panel_h, fill=theme["panel_fill"], radius=radius)
-            cv2.addWeighted(overlay, 0.82, frame, 0.18, 0, frame)
+            _alpha_blend_roi(frame, panel_x, panel_y, panel_x + panel_w, panel_y + panel_h, theme["panel_fill"], 0.82, radius)
             styled_rect(frame, panel_x, panel_y, panel_x + panel_w, panel_y + panel_h, border=theme["panel_border"], thickness=2, radius=radius)
         self._settings_button_rects: dict[str, tuple[int, int, int, int]] = {}
 

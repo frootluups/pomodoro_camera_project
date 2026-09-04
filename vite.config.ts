@@ -9,5 +9,22 @@ export default defineConfig({
     target: "es2023",
     outDir: "dist",
     sourcemap: true,
+    minify: "esbuild",
+    cssMinify: true,
+    chunkSizeWarningLimit: 800,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          tfjs: ["@tensorflow/tfjs"],
+          blazeface: ["@tensorflow-models/blazeface"],
+        },
+      },
+    },
+  },
+  optimizeDeps: {
+    include: ["@tensorflow/tfjs", "@tensorflow-models/blazeface"],
+  },
+  esbuild: {
+    drop: process.env.NODE_ENV === "production" ? ["console", "debugger"] : [],
   },
 });

@@ -12,10 +12,13 @@
   --radius: 14px;
   --xp-bg: #d4d0c8;
   --xp-panel: #ece9d8;
+  --shadow: 0 20px 60px rgba(0,0,0,0.35);
+  --shadow-lg: 0 24px 80px rgba(0,0,0,0.5);
 }
 
 * { box-sizing: border-box; }
 html, body { height: 100%; }
+html { scrollbar-gutter: stable; }
 body {
   margin: 0;
   font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
@@ -23,11 +26,13 @@ body {
   color: var(--text);
   display: flex;
   flex-direction: column;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 #app { display: flex; flex-direction: column; min-height: 100vh; }
 
-/* Topbar */
+/* Topbar — glass + subtle accent underline */
 .topbar {
   display: flex;
   align-items: center;
@@ -39,36 +44,45 @@ body {
   position: sticky;
   top: 0;
   z-index: 10;
-  backdrop-filter: blur(8px);
+  backdrop-filter: blur(10px) saturate(1.1);
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--accent) 18%, transparent), 0 8px 24px rgba(0,0,0,0.18);
 }
-.brand { font-weight: 700; letter-spacing: 0.02em; }
+.brand { font-weight: 800; letter-spacing: 0.02em; display: flex; align-items: center; gap: 8px; }
+.brand::before { content: ""; width: 8px; height: 8px; border-radius: 999px; background: var(--accent); box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 60%, transparent); }
 .topbar-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
-/* Buttons */
+/* Buttons — pill, focus ring, press feedback */
 .btn {
   appearance: none;
   border: 1px solid var(--panel-border);
   background: var(--panel);
   color: var(--text);
-  padding: 8px 12px;
+  padding: 8px 14px;
   border-radius: 999px;
-  font-weight: 600;
+  font-weight: 650;
+  letter-spacing: 0.01em;
   cursor: pointer;
-  transition: transform 120ms, filter 120ms;
+  transition: transform 120ms ease, filter 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset, 0 6px 16px rgba(0,0,0,0.18);
 }
-.btn:hover { filter: brightness(1.08); }
+.btn:hover { filter: brightness(1.08); border-color: color-mix(in srgb, var(--accent) 35%, var(--panel-border)); }
 .btn:active { transform: translateY(1px) scale(0.98); }
-.btn-accent { background: var(--accent); color: white; border-color: transparent; }
-.btn-ghost { background: transparent; border-color: var(--divider); color: var(--subtext); }
+.btn:focus-visible { outline: none; box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent), 0 6px 16px rgba(0,0,0,0.18); }
+.btn-accent { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 92%, white 8%), var(--accent)); color: white; border-color: transparent; }
+.btn-accent:hover { filter: brightness(1.06); box-shadow: 0 8px 20px color-mix(in srgb, var(--accent) 35%, transparent); }
+.btn-ghost { background: transparent; border-color: var(--divider); color: var(--subtext); box-shadow: none; }
 .btn-small { padding: 6px 10px; font-size: 13px; border-radius: 10px; }
 
-/* Stage */
+/* Stage — subtle vignette + glow */
 .stage {
   flex: 1;
   display: grid;
   place-items: center;
-  padding: 14px;
-  background: radial-gradient(1200px 600px at 50% -10%, color-mix(in srgb, var(--accent) 10%, transparent), transparent), var(--bg);
+  padding: 16px;
+  background:
+    radial-gradient(900px 500px at 50% -8%, color-mix(in srgb, var(--accent) 14%, transparent), transparent 60%),
+    radial-gradient(700px 400px at 85% 95%, color-mix(in srgb, var(--accent) 8%, transparent), transparent 60%),
+    var(--bg);
   position: relative;
 }
 .stage-inner {
@@ -79,9 +93,10 @@ body {
   background: #0e0e10;
   border-radius: var(--radius);
   overflow: hidden;
-  border: 1px solid var(--divider);
-  box-shadow: 0 20px 60px rgba(0,0,0,0.35);
+  border: 1px solid color-mix(in srgb, var(--divider) 85%, transparent);
+  box-shadow: var(--shadow), 0 0 0 1px rgba(255,255,255,0.04) inset;
 }
+.stage-inner.editing { outline: 2px dashed color-mix(in srgb, var(--accent) 55%, transparent); outline-offset: 2px; }
 #cam, #overlay {
   position: absolute;
   inset: 0;
@@ -97,16 +112,20 @@ body {
   pointer-events: none;
 }
 .camera-off {
-  margin-top: 12px;
+  margin-top: 14px;
   text-align: center;
-  padding: 14px;
+  padding: 16px 18px;
   border: 1px dashed var(--divider);
-  border-radius: 12px;
-  background: color-mix(in srgb, var(--panel) 70%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--panel) 72%, transparent);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 10px 30px rgba(0,0,0,0.18);
+  animation: fadeIn 220ms ease;
 }
-.camera-off-card { font-weight: 800; font-size: 18px; }
+.camera-off-card { font-weight: 800; font-size: 18px; letter-spacing: 0.01em; }
 .camera-off-hint { margin: 6px 0 0; color: var(--subtext); font-size: 13px; }
 .hidden { display: none !important; }
+@keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
 /* Layout tiles (HTML fallback for draggable tiles) */
 .tile {
@@ -131,72 +150,79 @@ body {
   display: flex;
   gap: 16px;
   justify-content: center;
-  padding: 8px 12px;
+  padding: 10px 12px;
   color: var(--subtext);
   font-size: 12px;
   border-top: 1px solid var(--divider);
+  background: color-mix(in srgb, var(--panel) 55%, transparent);
+  backdrop-filter: blur(6px);
 }
 kbd {
   display: inline-block;
   border: 1px solid var(--divider);
   border-bottom-width: 2px;
-  padding: 1px 6px;
-  border-radius: 6px;
+  padding: 2px 7px;
+  border-radius: 7px;
   background: var(--panel);
   font-family: ui-monospace, monospace;
   font-size: 11px;
+  box-shadow: 0 1px 0 rgba(255,255,255,0.06) inset;
 }
 
-/* Settings dialog */
+/* Settings dialog — elevated card */
 .settings-dialog {
-  border: 1px solid var(--panel-border);
-  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--panel-border) 85%, transparent);
+  border-radius: 18px;
   padding: 0;
   width: min(720px, 92vw);
-  background: var(--panel);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--panel) 96%, white 4%), var(--panel));
   color: var(--text);
-  box-shadow: 0 24px 80px rgba(0,0,0,0.5);
+  box-shadow: var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.06) inset;
+  animation: dialogIn 180ms ease;
 }
-.settings-dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(4px); }
-.settings-form { padding: 14px; }
-.settings-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--divider); padding-bottom: 10px; }
-.settings-header h2 { margin: 0; font-size: 18px; }
-.settings-grid { display: grid; gap: 12px; padding: 12px 0; }
-.field { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.field > span:first-child { color: var(--subtext); font-size: 14px; }
+@keyframes dialogIn { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
+.settings-dialog::backdrop { background: rgba(0,0,0,0.55); backdrop-filter: blur(6px) saturate(1.05); }
+.settings-form { padding: 16px; }
+.settings-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--divider); padding-bottom: 12px; }
+.settings-header h2 { margin: 0; font-size: 18px; letter-spacing: 0.01em; }
+.settings-grid { display: grid; gap: 14px; padding: 14px 0; }
+.field { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 10px; border-radius: 12px; background: color-mix(in srgb, var(--panel) 85%, transparent); border: 1px solid color-mix(in srgb, var(--divider) 55%, transparent); }
+.field > span:first-child { color: var(--subtext); font-size: 13px; font-weight: 600; letter-spacing: 0.02em; text-transform: uppercase; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; }
 .stepper { display: flex; align-items: center; gap: 8px; }
-.stepper output { min-width: 3ch; text-align: center; font-weight: 700; }
-.settings-footer { display: flex; justify-content: stretch; padding-top: 10px; border-top: 1px solid var(--divider); }
+.stepper output { min-width: 3.5ch; text-align: center; font-weight: 800; font-variant-numeric: tabular-nums; }
+.settings-footer { display: flex; justify-content: stretch; padding-top: 12px; border-top: 1px solid var(--divider); }
 .settings-footer .btn { flex: 1; }
 
-/* Onboarding */
+/* Onboarding — polished card with progress */
 .onboarding {
   position: fixed;
   inset: 0;
   display: grid;
   place-items: center;
-  background: rgba(10,10,12,0.55);
-  backdrop-filter: blur(4px);
+  background: rgba(10,10,12,0.58);
+  backdrop-filter: blur(8px) saturate(1.05);
   z-index: 40;
   padding: 16px;
+  animation: fadeIn 180ms ease;
 }
 .onboarding-card {
   width: min(560px, 92vw);
-  background: #1e1e22;
-  border: 1px solid var(--accent);
-  border-radius: 18px;
-  padding: 18px;
-  box-shadow: 0 24px 80px rgba(0,0,0,0.5);
+  background: linear-gradient(180deg, #232326, #1c1c1e);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  border-radius: 20px;
+  padding: 20px;
+  box-shadow: var(--shadow-lg), 0 0 0 1px rgba(255,255,255,0.06) inset;
   text-align: left;
+  animation: dialogIn 200ms ease;
 }
-.onboarding-bar { height: 4px; background: var(--accent); border-radius: 999px; margin: -18px -18px 14px; }
-.onboarding-card h2 { margin: 0 0 8px; font-size: 20px; color: var(--accent); }
-.onboarding-card p { margin: 0; color: var(--text); line-height: 1.5; white-space: pre-line; }
-.onboarding-dots { display: flex; gap: 6px; justify-content: center; margin: 14px 0 6px; }
-.onboarding-dots i { width: 8px; height: 8px; border-radius: 999px; background: #444; display: block; }
-.onboarding-dots i.active { background: var(--accent); }
-.onboarding-actions { display: flex; gap: 8px; justify-content: space-between; margin-top: 12px; }
+.onboarding-bar { height: 4px; background: var(--accent); border-radius: 999px; margin: -20px -20px 16px; box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 35%, transparent); }
+.onboarding-card h2 { margin: 0 0 8px; font-size: 20px; color: var(--accent); letter-spacing: 0.01em; }
+.onboarding-card p { margin: 0; color: var(--text); line-height: 1.6; white-space: pre-line; }
+.onboarding-dots { display: flex; gap: 7px; justify-content: center; margin: 16px 0 6px; }
+.onboarding-dots i { width: 8px; height: 8px; border-radius: 999px; background: #3a3a3e; display: block; transition: background 180ms, transform 180ms, width 180ms; }
+.onboarding-dots i.active { background: var(--accent); width: 22px; box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 45%, transparent); }
+.onboarding-actions { display: flex; gap: 8px; justify-content: space-between; margin-top: 14px; }
 .onboarding-actions .btn { flex: 1; }
 
 /* Theme variants via data-theme */

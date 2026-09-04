@@ -88,8 +88,8 @@ export class PomodoroApp {
   }
 
   bindTopbar(): void {
-    document.getElementById("btn-start")?.addEventListener("click", () => this.timer.toggleTimer());
-    document.getElementById("btn-reset")?.addEventListener("click", () => this.timer.resetTimer());
+    document.getElementById("btn-start")?.addEventListener("click", () => { this.timer.unlockAudio(); this.timer.toggleTimer(); });
+    document.getElementById("btn-reset")?.addEventListener("click", () => { this.timer.unlockAudio(); this.timer.resetTimer(); });
     document.getElementById("btn-settings")?.addEventListener("click", () => this.openSettings());
     document.getElementById("btn-edit")?.addEventListener("click", () => this.toggleEditMode());
   }
@@ -97,17 +97,21 @@ export class PomodoroApp {
   bindKeys(): void {
     window.addEventListener("keydown", (e) => {
       if (this.onboarding.active) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.onboarding.next(); if (!this.onboarding.active) this.timer.saveSettings(); this.renderOnboarding(); }
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.timer.unlockAudio(); this.onboarding.next(); if (!this.onboarding.active) this.timer.saveSettings(); this.renderOnboarding(); }
         else if (e.key === "Backspace") { this.onboarding.back(); this.renderOnboarding(); }
         else if (e.key === "Escape") { this.onboarding.skip(); this.timer.saveSettings(); this.renderOnboarding(); }
         return;
       }
       const k = e.key.toLowerCase();
-      if (k === "s") this.timer.toggleTimer();
+      if (k === "s") { this.timer.unlockAudio(); this.timer.toggleTimer(); }
       else if (k === "e") this.toggleEditMode();
       else if (k === "q") this.timer.stopTimer();
       else if (k === "escape" && this.layoutEditMode) this.toggleEditMode(false);
     });
+    // Unlock audio on any first interaction (required by autoplay policy)
+    const unlockOnce = (): void => { this.timer.unlockAudio(); document.removeEventListener("click", unlockOnce); document.removeEventListener("keydown", unlockOnce); };
+    document.addEventListener("click", unlockOnce);
+    document.addEventListener("keydown", unlockOnce);
   }
 
   bindCanvasDrag(): void {
@@ -292,8 +296,11 @@ export class PomodoroApp {
   private handleResize(): void {
     const r = this.deps.stageInner.getBoundingClientRect();
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    this.deps.canvas.width = Math.max(320, Math.round(r.width * dpr));
-    this.deps.canvas.height = Math.max(240, Math.round(r.height * dpr));
+    const w = Math.max(320, Math.round(r.width * dpr));
+    const h = Math.max(240, Math.round(r.height * dpr));
+    if (this.deps.canvas.width === w && this.deps.canvas.height === h) return;
+    this.deps.canvas.width = w;
+    this.deps.canvas.height = h;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.renderHtmlTiles();
   }
@@ -536,16 +543,24 @@ export class PomodoroApp {
     if (editBtn) editBtn.textContent = this.layoutEditMode ? "Exit Edit" : "Edit Layout (E)";
   }
 
+  private visionBusy = false;
+  private lastVisionTs = 0;
+  private visionIntervalMs = 66; // ~15 fps vision, render stays 60fps
+
   async tick(): Promise<void> {
     this.timer.updateTimer();
-    // vision tick throttled
-    if (this.timer.cameraEnabled && this.deps.video.readyState >= 2 && this.stream) {
-      try {
-        const c = this.visionEveryN;
-        const score = await this.vision.analyze(this.deps.video, this.timer.isRunning, c);
+    // Vision: non-blocking, throttled by time + busy flag — never stalls render
+    const now = performance.now();
+    const canRunVision = this.timer.cameraEnabled && this.deps.video.readyState >= 2 && !!this.stream
+      && !this.visionBusy && (now - this.lastVisionTs >= this.visionIntervalMs);
+    if (canRunVision) {
+      this.visionBusy = true;
+      this.lastVisionTs = now;
+      const c = this.visionEveryN;
+      this.vision.analyze(this.deps.video, this.timer.isRunning, c).then((score) => {
         this.timer.focusScore = score;
         this.timer.focusState = this.vision.classify(score, this.timer.isRunning);
-      } catch {}
+      }).catch(() => {}).finally(() => { this.visionBusy = false; });
     } else if (!this.timer.cameraEnabled) {
       this.timer.focusState = FocusState.Neutral; this.timer.focusScore = 0;
     }
@@ -557,8 +572,12 @@ export class PomodoroApp {
     this.renderOnboarding();
     this.renderHtmlTiles();
     await this.startCamera().catch(() => {});
+    // Visibility-aware loop — pause vision when tab hidden
+    let hidden = document.hidden;
+    document.addEventListener("visibilitychange", () => { hidden = document.hidden; });
     const loop = async (): Promise<void> => {
-      await this.tick();
+      if (!hidden) await this.tick();
+      else this.draw(); // still draw timer even when hidden
       this.rafId = requestAnimationFrame(() => { void loop(); });
     };
     void loop();

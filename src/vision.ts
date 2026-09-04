@@ -69,23 +69,61 @@ export class VisionEngine {
   private frameIdx = 0;
   private prevSmall: ImageData | null = null;
   private smoothScore: number | null = null;
+  // Reused canvases — avoid per-frame allocation/GC pressure
+  private motionCanvas: HTMLCanvasElement | null = null;
+  private motionCtx: CanvasRenderingContext2D | null = null;
+  private detectCanvas: HTMLCanvasElement | null = null;
+  private detectCtx: CanvasRenderingContext2D | null = null;
+  private embedCanvas: HTMLCanvasElement | null = null;
+  private embedCtx: CanvasRenderingContext2D | null = null;
   // expose for UI
   lastFaces: BBox[] = [];
   motion = 0;
+
+  private getMotionCanvas(): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+    if (!this.motionCanvas) {
+      this.motionCanvas = document.createElement("canvas");
+      this.motionCanvas.width = 160; this.motionCanvas.height = 120;
+      this.motionCtx = this.motionCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    return this.motionCtx && this.motionCanvas ? { canvas: this.motionCanvas, ctx: this.motionCtx } : null;
+  }
+
+  private getDetectCanvas(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+    const cw = Math.min(640, w), ch = Math.min(480, h);
+    if (!this.detectCanvas) {
+      this.detectCanvas = document.createElement("canvas");
+      this.detectCtx = this.detectCanvas.getContext("2d");
+    }
+    if (this.detectCanvas.width !== cw || this.detectCanvas.height !== ch) {
+      this.detectCanvas.width = cw; this.detectCanvas.height = ch;
+      this.detectCtx = this.detectCanvas.getContext("2d");
+    }
+    return this.detectCtx && this.detectCanvas ? { canvas: this.detectCanvas, ctx: this.detectCtx } : null;
+  }
+
+  private getEmbedCanvas(w: number, h: number): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+    if (!this.embedCanvas) {
+      this.embedCanvas = document.createElement("canvas");
+      this.embedCtx = this.embedCanvas.getContext("2d");
+    }
+    if (this.embedCanvas.width !== w || this.embedCanvas.height !== h) {
+      this.embedCanvas.width = w; this.embedCanvas.height = h;
+      this.embedCtx = this.embedCanvas.getContext("2d");
+    }
+    return this.embedCtx && this.embedCanvas ? { canvas: this.embedCanvas, ctx: this.embedCtx } : null;
+  }
 
   async detectFaces(video: HTMLVideoElement, width: number, height: number): Promise<BBox[]> {
     // Try native FaceDetector first (fast, no model download)
     if (this.nativeDetector) {
       try {
-        // draw to small offscreen canvas for detector
-        const c = document.createElement("canvas");
-        c.width = Math.min(640, width); c.height = Math.min(480, height);
-        const ctx = c.getContext("2d");
-        if (ctx) {
-          ctx.drawImage(video, 0, 0, c.width, c.height);
-          const faces = await this.nativeDetector.detect(c);
+        const dc = this.getDetectCanvas(width, height);
+        if (dc) {
+          dc.ctx.drawImage(video, 0, 0, dc.canvas.width, dc.canvas.height);
+          const faces = await this.nativeDetector.detect(dc.canvas);
           if (faces.length) {
-            const sx = width / c.width, sy = height / c.height;
+            const sx = width / dc.canvas.width, sy = height / dc.canvas.height;
             return faces.map((f) => [f.boundingBox.x * sx, f.boundingBox.y * sy, f.boundingBox.width * sx, f.boundingBox.height * sy] as BBox);
           }
         }
@@ -108,13 +146,11 @@ export class VisionEngine {
   /** Motion + face combine → 0..100, mirrors PomodoroTimer.analyze_focus */
   async analyze(video: HTMLVideoElement, isRunning: boolean, everyNFrames = 2): Promise<number> {
     const w = video.videoWidth || 640, h = video.videoHeight || 480;
-    // Build small grayscale 160×120 for motion
-    const small = document.createElement("canvas");
-    small.width = 160; small.height = 120;
-    const sctx = small.getContext("2d", { willReadFrequently: true });
-    if (!sctx) return 0;
-    sctx.drawImage(video, 0, 0, 160, 120);
-    const cur = sctx.getImageData(0, 0, 160, 120);
+    // Reused 160×120 canvas for motion
+    const mc = this.getMotionCanvas();
+    if (!mc) return 0;
+    mc.ctx.drawImage(video, 0, 0, 160, 120);
+    const cur = mc.ctx.getImageData(0, 0, 160, 120);
 
     // Face detection cadence
     this.frameIdx++;
@@ -130,13 +166,10 @@ export class VisionEngine {
       for (const trk of active) {
         const newly = trk.hits === 2 && trk.lastUpdate === this.frameIdx;
         if (newly) {
-          // canvas for embedding
-          const embCanvas = document.createElement("canvas");
-          embCanvas.width = w; embCanvas.height = h;
-          const ectx = embCanvas.getContext("2d");
-          if (ectx) {
-            ectx.drawImage(video, 0, 0, w, h);
-            const emb = this.gallery.embedFromCanvas(ectx.canvas as unknown as HTMLCanvasElement, trk.bbox);
+          const ec = this.getEmbedCanvas(w, h);
+          if (ec) {
+            ec.ctx.drawImage(video, 0, 0, w, h);
+            const emb = this.gallery.embedFromCanvas(ec.canvas as unknown as HTMLCanvasElement, trk.bbox);
             let gid: number | null = emb ? this.gallery.match(emb) : null;
             if (gid !== null && used.has(gid)) gid = null;
             if (gid !== null) { trk.gid = gid; trk.label = this.gallery.label(gid); used.add(gid); }
@@ -167,13 +200,14 @@ export class VisionEngine {
     this.motion = motion;
     this.prevSmall = cur;
 
+    // Face presence is primary signal — motion is secondary
     const faceScore = this.lastFaces.length ? 1 : 0;
-    const motionPenalty = Math.min(1, motion * (faceScore ? 1.6 : 2.4));
-    let score = faceScore * 72 + (1 - motionPenalty) * 28;
-    if (!faceScore) score *= 0.55;
+    const motionPenalty = Math.min(1, motion * (faceScore ? 1.0 : 2.0));
+    let score = faceScore * 80 + (1 - motionPenalty) * 20;
+    if (!faceScore) score *= 0.45;
     score = Math.max(0, Math.min(100, score));
     const prev = this.smoothScore ?? score;
-    score = prev * 0.35 + score * 0.65;
+    score = prev * 0.30 + score * 0.70;
     this.smoothScore = score;
     return score;
   }

@@ -116,6 +116,37 @@ export class PomodoroTimer {
     return { text: "Long Break", color: [52, 152, 219], progress: 0.5 };
   }
 
+  private audioCtx: AudioContext | null = null;
+  private audioUnlocked = false;
+
+  private getAudioContext(): AudioContext | null {
+    if (this.audioCtx && this.audioCtx.state !== "closed") return this.audioCtx;
+    try {
+      const Ctx = (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }).AudioContext
+        ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!Ctx) return null;
+      this.audioCtx = new Ctx();
+      return this.audioCtx;
+    } catch { return null; }
+  }
+
+  /** Call on first user gesture to unlock AudioContext (autoplay policy). */
+  unlockAudio(): void {
+    if (this.audioUnlocked) return;
+    const ctx = this.getAudioContext();
+    if (!ctx) return;
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
+    // Play silent buffer to unlock
+    try {
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    } catch {}
+    this.audioUnlocked = true;
+  }
+
   shouldAlert(): boolean {
     if (!this.alertsEnabled || !this.isRunning || this.focusState !== FocusState.Slacking) return false;
     const now = Date.now() / 1000;
@@ -126,20 +157,20 @@ export class PomodoroTimer {
 
   playAlertSound(): void {
     if (!this.shouldAlert()) return;
+    const ctx = this.getAudioContext();
+    if (!ctx) return;
+    // Resume if suspended (browser autoplay policy)
+    if (ctx.state === "suspended") ctx.resume().catch(() => {});
     try {
-      const Ctx = (window as unknown as { AudioContext?: typeof AudioContext; webkitAudioContext?: typeof AudioContext }).AudioContext
-        ?? (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!Ctx) return;
-      const ctx = new Ctx();
       const mk = (freq: number, dur: number, delay: number): void => {
         const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = "sine";
         o.frequency.value = freq; o.connect(g); g.connect(ctx.destination);
-        g.gain.setValueAtTime(0.12, ctx.currentTime + delay);
+        g.gain.setValueAtTime(0.18, ctx.currentTime + delay);
         g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + dur);
         o.start(ctx.currentTime + delay); o.stop(ctx.currentTime + delay + dur);
       };
-      mk(880, 0.18, 0); mk(660, 0.22, 0.2);
-      setTimeout(() => { ctx.close().catch(() => {}); }, 600);
+      mk(880, 0.18, 0); mk(660, 0.22, 0.2); mk(880, 0.12, 0.42);
     } catch {}
   }
 }

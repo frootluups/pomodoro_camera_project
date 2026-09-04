@@ -17,18 +17,24 @@ async function boot(): Promise<void> {
   const settingsDialog = qs<HTMLDialogElement>("#settings-dialog");
   const onboardingEl = qs<HTMLElement>("#onboarding");
 
-  // DPI-aware canvas size
+  // DPI-aware canvas size — debounced resize
   function sizeCanvas(): void {
     const r = stageInner.getBoundingClientRect();
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    canvas.width = Math.max(320, Math.round(r.width * dpr));
-    canvas.height = Math.max(240, Math.round(r.height * dpr));
-    // CSS size stays via width:100% height:100% (stageInner controls)
+    const w = Math.max(320, Math.round(r.width * dpr));
+    const h = Math.max(240, Math.round(r.height * dpr));
+    if (canvas.width === w && canvas.height === h) return;
+    canvas.width = w;
+    canvas.height = h;
     const ctx = canvas.getContext("2d");
     if (ctx) ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
   sizeCanvas();
-  window.addEventListener("resize", sizeCanvas);
+  let resizeTimer: number | null = null;
+  window.addEventListener("resize", () => {
+    if (resizeTimer !== null) cancelAnimationFrame(resizeTimer);
+    resizeTimer = requestAnimationFrame(() => { resizeTimer = null; sizeCanvas(); });
+  });
 
   const app = new PomodoroApp({ video, canvas, stageInner, layoutLayer, cameraOffEl, settingsDialog, onboardingEl });
 
