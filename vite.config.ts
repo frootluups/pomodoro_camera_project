@@ -13,6 +13,11 @@ export default defineConfig({
     cssMinify: true,
     chunkSizeWarningLimit: 800,
     rollupOptions: {
+      input: {
+        main: "index.html",
+        embed: "embed.html",
+        demo: "embed-demo.html",
+      },
       output: {
         manualChunks: {
           tfjs: ["@tensorflow/tfjs"],

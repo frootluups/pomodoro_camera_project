@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en" data-pomodoro-embed>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pomodoro Camera — Embed</title>
+    <meta name="color-scheme" content="dark light" />
+    <style>
+      html, body { margin: 0; padding: 0; height: 100%; background: #1c1c1e; }
+      #pomodoro-embed-root { min-height: 100vh; display: grid; place-items: center; padding: 12px; }
+      #pomodoro-embed-root pomodoro-camera { width: min(520px, 100%); }
+    </style>
+  </head>
+  <body>
+    <div id="pomodoro-embed-root"></div>
+    <script type="module" src="/src/embed.ts"></script>
+  </body>
+</html>

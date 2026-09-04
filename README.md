@@ -51,6 +51,61 @@ npm run preview
 
 Requires Node 20+. Camera needs HTTPS or `localhost`.
 
+### Embeddable Widget — add to any website
+
+**Option A — Web Component (recommended, isolated via Shadow DOM):**
+
+```html
+<script type="module" src="https://your-cdn.com/pomodoro-embed.js"></script>
+<pomodoro-camera theme="dark" pomodoro="25" break="5"></pomodoro-camera>
+
+<!-- Compact variant -->
+<pomodoro-camera theme="light" compact width="380px"></pomodoro-camera>
+```
+
+Attributes: `theme="dark|light|xp"`, `pomodoro="25"`, `break="5"`, `camera="false"`, `compact`, `width`, `height`. All reactive.
+
+**Option B — JavaScript API:**
+
+```html
+<div id="my-widget"></div>
+<script type="module">
+  import { mountPomodoro } from "https://your-cdn.com/pomodoro-embed.js";
+  // or via global: window.PomodoroCamera.mount(...)
+  const el = mountPomodoro("#my-widget", { theme: "dark", pomodoroMinutes: 25, compact: true });
+  el.addEventListener("pomodoro-ready", ({ detail: { app } }) => {
+    // app.timer, app.vision, app.layout available
+  });
+  // Imperative: el.start(), el.pause(), el.reset(), el.setTheme("light")
+</script>
+```
+
+**Option C — iframe (zero JS, easiest for CMS/blog):**
+
+```html
+<iframe
+  src="https://your-site.com/embed.html?theme=dark&pomodoro=25&break=5"
+  allow="camera; microphone"
+  width="520" height="600"
+  style="border:0; border-radius:14px; overflow:hidden"
+  loading="lazy"
+></iframe>
+```
+
+Build outputs:
+- `npm run build` → `dist/index.html` + `dist/embed.html` (multi-page)
+- `npm run build:embed` → `dist/pomodoro-embed.js` + `dist/pomodoro-embed.umd.js` (single-file library for CDN)
+
+**Option D — npm package (if published):**
+
+```bash
+npm install pomodoro-camera-web
+```
+```ts
+import "pomodoro-camera-web/embed"; // auto-defines <pomodoro-camera>
+import { mountPomodoro } from "pomodoro-camera-web/embed";
+```
+
 ## Controls
 
 | Key | Action |

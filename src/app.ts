@@ -8,7 +8,7 @@ import { VisionEngine } from "./vision.ts";
 import { OnboardingManager } from "./onboarding.ts";
 import { styledRect, hGradient, drawXpProgressBar, drawXpTitleBar } from "./render.ts";
 
-// DOM refs — injected by main.ts
+// DOM refs — injected by main.ts or embed.ts (shadow DOM)
 export interface AppDeps {
   video: HTMLVideoElement;
   canvas: HTMLCanvasElement;
@@ -17,6 +17,10 @@ export interface AppDeps {
   cameraOffEl: HTMLElement;
   settingsDialog: HTMLDialogElement;
   onboardingEl: HTMLElement;
+  /** Optional root for scoped queries (shadowRoot or host element). Defaults to document. */
+  root?: ParentNode & { getElementById?(id: string): HTMLElement | null };
+  /** Optional host element for theme attribute (shadow host). Defaults to document.documentElement */
+  host?: HTMLElement;
 }
 
 export class PomodoroApp {
@@ -34,6 +38,10 @@ export class PomodoroApp {
   private layoutEditMode = false;
   private presetIdx = 0;
   private visionEveryN = 2;
+  /** Scoped query root — document or shadowRoot */
+  private root: ParentNode & { getElementById?(id: string): HTMLElement | null };
+  /** Host element for theme attribute */
+  private hostEl: HTMLElement;
 
   constructor(deps: AppDeps) {
     this.deps = deps;
@@ -52,6 +60,10 @@ export class PomodoroApp {
     // onboarding: show only on first visit
     if (localStorage.getItem("pomodoro.settings.v1")) this.onboarding.active = false;
 
+    // Scoped root/host for embed (shadow DOM) vs standalone (document)
+    this.root = (deps.root ?? document) as ParentNode & { getElementById?(id: string): HTMLElement | null };
+    this.hostEl = deps.host ?? document.documentElement;
+
     this.bindSettingsUI();
     this.bindOnboardingUI();
     this.bindTopbar();
@@ -61,8 +73,21 @@ export class PomodoroApp {
     window.addEventListener("resize", () => this.handleResize());
   }
 
+  private qs<T extends HTMLElement>(id: string): T | null {
+    // Try scoped root first, then document fallback
+    const fromRoot = (this.root as unknown as { getElementById?: (id: string) => HTMLElement | null }).getElementById?.(id)
+      ?? (this.root as unknown as Document).querySelector?.(`#${id}`) as T | null
+      ?? null;
+    if (fromRoot) return fromRoot as T;
+    return document.getElementById(id) as T | null;
+  }
+
   applyTheme(): void {
-    document.documentElement.setAttribute("data-theme", this.timer.theme);
+    this.hostEl.setAttribute("data-theme", this.timer.theme);
+    // Also set on document for standalone mode
+    if (this.hostEl !== document.documentElement) {
+      document.documentElement.setAttribute("data-theme", this.timer.theme);
+    }
   }
 
   async startCamera(): Promise<boolean> {
@@ -88,10 +113,10 @@ export class PomodoroApp {
   }
 
   bindTopbar(): void {
-    document.getElementById("btn-start")?.addEventListener("click", () => { this.timer.unlockAudio(); this.timer.toggleTimer(); });
-    document.getElementById("btn-reset")?.addEventListener("click", () => { this.timer.unlockAudio(); this.timer.resetTimer(); });
-    document.getElementById("btn-settings")?.addEventListener("click", () => this.openSettings());
-    document.getElementById("btn-edit")?.addEventListener("click", () => this.toggleEditMode());
+    this.qs<HTMLButtonElement>("btn-start")?.addEventListener("click", () => { this.timer.unlockAudio(); this.timer.toggleTimer(); });
+    this.qs<HTMLButtonElement>("btn-reset")?.addEventListener("click", () => { this.timer.unlockAudio(); this.timer.resetTimer(); });
+    this.qs<HTMLButtonElement>("btn-settings")?.addEventListener("click", () => this.openSettings());
+    this.qs<HTMLButtonElement>("btn-edit")?.addEventListener("click", () => this.toggleEditMode());
   }
 
   bindKeys(): void {
@@ -537,9 +562,9 @@ export class PomodoroApp {
   }
 
   private updateTopbarLabels(): void {
-    const startBtn = document.getElementById("btn-start") as HTMLButtonElement | null;
+    const startBtn = this.qs<HTMLButtonElement>("btn-start");
     if (startBtn) startBtn.textContent = this.timer.isRunning ? "Running" : "Start";
-    const editBtn = document.getElementById("btn-edit") as HTMLButtonElement | null;
+    const editBtn = this.qs<HTMLButtonElement>("btn-edit");
     if (editBtn) editBtn.textContent = this.layoutEditMode ? "Exit Edit" : "Edit Layout (E)";
   }
 

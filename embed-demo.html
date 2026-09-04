@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Pomodoro Camera — Embed Demo</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; font-family: "Segoe UI", system-ui, sans-serif; background: #f4f4f6; color: #222; }
+      header { padding: 24px; background: #1c1c1e; color: #f0f0f0; }
+      header h1 { margin: 0 0 6px; font-size: 22px; }
+      header p { margin: 0; color: #b9b9be; font-size: 13px; }
+      header code { background: #2a2a2e; padding: 2px 6px; border-radius: 6px; font-size: 12px; }
+      main { max-width: 960px; margin: 0 auto; padding: 24px; display: grid; gap: 24px; }
+      section { background: white; border: 1px solid #ddd; border-radius: 12px; padding: 16px; }
+      section h2 { margin: 0 0 8px; font-size: 16px; }
+      section p { margin: 0 0 12px; color: #555; font-size: 13px; }
+      pre { background: #1c1c1e; color: #d0d0d8; padding: 12px; border-radius: 8px; overflow: auto; font-size: 12px; margin: 0; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+      iframe { border: 1px solid #ddd; border-radius: 12px; width: 100%; height: 520px; background: #1c1c1e; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>🍅 Pomodoro Camera — Embed Demo</h1>
+      <p>Three ways to embed. Build first: <code>npm run build</code> then open <code>dist/embed.html</code> or use <code>dist/pomodoro-embed.js</code>.</p>
+    </header>
+    <main>
+      <section>
+        <h2>1. Web Component (Shadow DOM, isolated)</h2>
+        <p>Drop-in custom element. Attributes are reactive.</p>
+        <pre>&lt;script type="module" src="/dist/pomodoro-embed.js"&gt;&lt;/script&gt;
+&lt;pomodoro-camera theme="dark" pomodoro="25" break="5"&gt;&lt;/pomodoro-camera&gt;
+&lt;pomodoro-camera theme="light" compact&gt;&lt;/pomodoro-camera&gt;</pre>
+        <div style="margin-top:12px; display:grid; gap:12px;">
+          <pomodoro-camera theme="dark" pomodoro="25" break="5"></pomodoro-camera>
+        </div>
+      </section>
+
+      <section>
+        <h2>2. JavaScript API</h2>
+        <pre>&lt;div id="my-widget"&gt;&lt;/div&gt;
+&lt;script type="module"&gt;
+  import { mountPomodoro } from "/dist/pomodoro-embed.js";
+  // or: window.PomodoroCamera.mount(...)
+  const el = mountPomodoro("#my-widget", { theme: "dark", compact: true });
+  el.addEventListener("pomodoro-ready", ({ detail: { app } }) =&gt; {
+    console.log(app.timer, app.vision);
+  });
+  el.start(); el.pause(); el.reset(); el.setTheme("light");
+&lt;/script&gt;</pre>
+        <div id="js-mount-target" style="margin-top:12px; border:1px dashed #ccc; border-radius:12px; padding:12px; min-height:120px;">
+          <p style="color:#888; font-size:12px; margin:0 0 8px;">JS mount target — will be filled on load:</p>
+        </div>
+      </section>
+
+      <section>
+        <h2>3. iframe (zero JS, CMS-friendly)</h2>
+        <pre>&lt;iframe
+  src="/embed.html?theme=dark&amp;pomodoro=25&amp;break=5"
+  allow="camera; microphone"
+  width="520" height="600"
+  style="border:0; border-radius:14px"
+  loading="lazy"
+&gt;&lt;/iframe&gt;</pre>
+        <div style="margin-top:12px;">
+          <iframe src="/embed.html?theme=dark" allow="camera; microphone" loading="lazy" title="Pomodoro Camera iframe demo"></iframe>
+        </div>
+      </section>
+
+      <section>
+        <h2>Attributes & Options</h2>
+        <pre>theme="dark|light|xp"   pomodoro="25"   break="5"   camera="false"   compact   width="400px" height="500px"</pre>
+        <p style="margin-top:8px;">All attributes are observed — changing them updates the widget live. Events: <code>pomodoro-ready</code> with <code>detail.app</code>.</p>
+      </section>
+    </main>
+
+    <script type="module">
+      import { mountPomodoro } from "/src/embed.ts";
+      // Demo JS mount
+      try {
+        mountPomodoro("#js-mount-target", { theme: "dark", compact: true });
+      } catch (e) { console.warn(e); }
+    </script>
+    <!-- Also load as web component for section 1 -->
+    <script type="module" src="/src/embed.ts"></script>
+  </body>
+</html>
