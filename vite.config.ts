@@ -26,8 +26,10 @@ export default defineConfig({
       },
     },
   },
+  worker: { format: "es" },
   optimizeDeps: {
     include: ["@tensorflow/tfjs", "@tensorflow-models/blazeface"],
+    exclude: ["src/workers/motion.worker.ts"],
   },
   esbuild: {
     drop: process.env.NODE_ENV === "production" ? ["console", "debugger"] : [],

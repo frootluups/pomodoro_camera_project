@@ -16,6 +16,11 @@ export const UI_SCALE_STEP = 0.08;
 
 export const POMODORO_MIN_DEFAULT = 25;
 export const BREAK_MIN_DEFAULT = 5;
+export const LONG_BREAK_MIN_DEFAULT = 15;
+export const POMODOROS_BEFORE_LONG_BREAK = 4;
+
+export const AUTO_START_POMODORO_DEFAULT = false;
+export const AUTO_START_BREAK_DEFAULT = false;
 
 export const FACE_DETECT_EVERY_N_FRAMES = 2;
 export const FOCUS_CONCENTRATED_THRESHOLD = 70;
@@ -33,3 +38,5 @@ export const TRACK_NMS_DIST_FRAC = 0.38;
 
 export const LAYOUT_STORAGE_KEY = "pomodoro.layout.v1";
 export const SETTINGS_STORAGE_KEY = "pomodoro.settings.v1";
+export const HISTORY_STORAGE_KEY = "pomodoro.history.v1";
+export const FOCUS_STORAGE_KEY = "pomodoro.focus.v1";

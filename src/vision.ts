@@ -13,17 +13,24 @@ function getNativeDetector(): FaceDetectorNative | null {
 }
 
 let blazeModel: { estimateFaces(img: HTMLVideoElement | HTMLCanvasElement, flipHorizontal: boolean): Promise<{ topLeft: [number, number]; bottomRight: [number, number] }[]> } | null = null;
+let blazeLoading: Promise<typeof blazeModel> | null = null;
 async function getBlazeModel() {
   if (blazeModel) return blazeModel;
-  try {
-    const tf = await import("@tensorflow/tfjs");
-    await tf.ready();
-    const blazeface = await import("@tensorflow-models/blazeface");
-    const m = await blazeface.load();
-    blazeModel = m as unknown as typeof blazeModel;
-    return blazeModel;
-  } catch { return null; }
+  if (blazeLoading) return blazeLoading;
+  blazeLoading = (async () => {
+    try {
+      const tf = await import("@tensorflow/tfjs");
+      await tf.ready();
+      const blazeface = await import("@tensorflow-models/blazeface");
+      const m = await blazeface.load();
+      blazeModel = m as unknown as typeof blazeModel;
+      return blazeModel;
+    } catch { return null; }
+    finally { blazeLoading = null; }
+  })();
+  return blazeLoading;
 }
+export function preloadBlazeModel(): void { void getBlazeModel(); }
 
 function nms(dets: BBox[]): BBox[] {
   if (dets.length <= 1) return dets.slice(0, TRACK_MAX_PERSONS);
@@ -142,6 +149,9 @@ export class VisionEngine {
     }
     return [];
   }
+
+  /** Preload BlazeFace in background when camera enabled — avoids first-frame stall */
+  preload(): void { if (!this.nativeDetector) void getBlazeModel(); }
 
   /** Motion + face combine → 0..100, mirrors PomodoroTimer.analyze_focus */
   async analyze(video: HTMLVideoElement, isRunning: boolean, everyNFrames = 2): Promise<number> {

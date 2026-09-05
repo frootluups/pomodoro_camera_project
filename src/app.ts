@@ -103,12 +103,38 @@ export class PomodoroApp {
       this.deps.video.srcObject = s;
       await this.deps.video.play().catch(() => {});
       this.vision.reset();
+      this.vision.preload();
       return true;
     } catch (e) {
       console.warn("Camera start failed", e);
       this.timer.cameraEnabled = false;
+      this.showCameraError(e);
       return false;
     }
+  }
+
+  private showCameraError(e: unknown): void {
+    const msg = e instanceof DOMException ? e.message : String(e);
+    const hint = msg.includes("NotAllowed") ? "Permission denied — allow camera in browser settings." : msg.includes("NotFound") ? "No camera found." : msg;
+    const el = this.deps.cameraOffEl;
+    const hintEl = el.querySelector(".camera-off-hint") as HTMLElement | null;
+    if (hintEl) hintEl.textContent = hint;
+    el.classList.remove("hidden");
+    // also surface as toast
+    this.showToast(hint);
+  }
+
+  private showToast(text: string): void {
+    let t = document.getElementById("toast") as HTMLElement | null;
+    if (!t) {
+      t = document.createElement("div");
+      t.id = "toast";
+      t.style.cssText = "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;border-radius:10px;z-index:9999;max-width:90vw;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,0.3)";
+      document.body.appendChild(t);
+    }
+    t.textContent = text;
+    t.style.display = "block";
+    setTimeout(() => { if (t) t.style.display = "none"; }, 4000);
   }
 
   stopCamera(): void {
@@ -218,6 +244,8 @@ export class PomodoroApp {
     bind("pom-plus", () => { this.timer.applySettings({ pomodoroMinutes: this.timer.sessionMinutes + 1 }); this.syncSettingsUI(); });
     bind("break-minus", () => { this.timer.applySettings({ breakMinutes: this.timer.breakMinutes - 1 }); this.syncSettingsUI(); });
     bind("break-plus", () => { this.timer.applySettings({ breakMinutes: this.timer.breakMinutes + 1 }); this.syncSettingsUI(); });
+    bind("long-minus", () => { this.timer.applySettings({ longBreakMinutes: this.timer.longBreakMinutes - 1 }); this.timer.saveSettings(); this.syncSettingsUI(); });
+    bind("long-plus", () => { this.timer.applySettings({ longBreakMinutes: this.timer.longBreakMinutes + 1 }); this.timer.saveSettings(); this.syncSettingsUI(); });
     bind("scale-minus", () => { this.timer.uiScale = Math.max(0.6, Math.round((this.timer.uiScale - 0.08) * 100) / 100); this.timer.saveSettings(); this.syncSettingsUI(); });
     bind("scale-plus", () => { this.timer.uiScale = Math.min(1.4, Math.round((this.timer.uiScale + 0.08) * 100) / 100); this.timer.saveSettings(); this.syncSettingsUI(); });
     bind("toggle-camera", async () => {
@@ -227,6 +255,19 @@ export class PomodoroApp {
     });
     bind("toggle-bar", () => { this.timer.progressBarEnabled = !this.timer.progressBarEnabled; this.syncSettingsUI(); });
     bind("toggle-alerts", () => { this.timer.alertsEnabled = !this.timer.alertsEnabled; this.timer.saveSettings(); this.syncSettingsUI(); });
+    bind("toggle-notifications", async () => {
+      if (this.timer.notificationsEnabled) { this.timer.notificationsEnabled = false; this.timer.saveSettings(); this.syncSettingsUI(); return; }
+      const ok = await this.timer.requestNotificationPermission();
+      this.syncSettingsUI();
+      if (ok) this.showToast("Notifications enabled");
+      else this.showToast("Notifications blocked — allow in browser settings");
+    });
+    bind("toggle-auto-break", () => { this.timer.autoStartBreak = !this.timer.autoStartBreak; this.timer.saveSettings(); this.syncSettingsUI(); });
+    bind("toggle-auto-pomo", () => { this.timer.autoStartPomodoro = !this.timer.autoStartPomodoro; this.timer.saveSettings(); this.syncSettingsUI(); });
+    bind("volume-test", () => { this.timer.unlockAudio(); this.timer.playTestSound(); });
+    bind("export-json", () => this.exportHistory("json"));
+    bind("export-csv", () => this.exportHistory("csv"));
+    bind("clear-history", () => { if (confirm("Clear all history?")) { this.clearHistory(); } });
     bind("toggle-theme", () => {
       const order: string[] = [ThemeName.Dark, ThemeName.Light, ThemeName.XP];
       const idx = order.indexOf(this.timer.theme); this.timer.theme = order[(idx + 1) % order.length] as typeof this.timer.theme;
@@ -259,26 +300,126 @@ export class PomodoroApp {
     const setOut = (id: string, v: string): void => { const el = q(id); if (el) el.textContent = v; };
     setOut("out-pom", String(this.timer.sessionMinutes));
     setOut("out-break", String(this.timer.breakMinutes));
+    setOut("out-long", String(this.timer.longBreakMinutes));
     setOut("out-scale", `${Math.round(this.timer.uiScale * 100)}%`);
+    const volEl = qa("#volume-slider") as HTMLInputElement | null;
+    if (volEl) volEl.value = String(Math.round(this.timer.volume * 100));
+    const volOut = q("out-volume");
+    if (volOut) volOut.textContent = `${Math.round(this.timer.volume * 100)}%`;
     const camBtn = qa('[data-action="toggle-camera"]');
     if (camBtn) camBtn.textContent = `Camera: ${this.timer.cameraEnabled ? "On" : "Off"}`;
     const barBtn = qa('[data-action="toggle-bar"]');
     if (barBtn) barBtn.textContent = `Bar: ${this.timer.progressBarEnabled ? "On" : "Off"}`;
     const alertsBtn = qa('[data-action="toggle-alerts"]');
     if (alertsBtn) alertsBtn.textContent = `Alerts: ${this.timer.alertsEnabled ? "On" : "Off"}`;
+    const notifBtn = qa('[data-action="toggle-notifications"]');
+    if (notifBtn) notifBtn.textContent = `Notifications: ${this.timer.notificationsEnabled ? "On" : "Off"}`;
+    const autoBreakBtn = qa('[data-action="toggle-auto-break"]');
+    if (autoBreakBtn) autoBreakBtn.textContent = `Auto-break: ${this.timer.autoStartBreak ? "On" : "Off"}`;
+    const autoPomoBtn = qa('[data-action="toggle-auto-pomo"]');
+    if (autoPomoBtn) autoPomoBtn.textContent = `Auto-pomodoro: ${this.timer.autoStartPomodoro ? "On" : "Off"}`;
     const themeBtn = qa('[data-action="toggle-theme"]');
     if (themeBtn) themeBtn.textContent = `Theme: ${this.timer.theme[0]?.toUpperCase()}${this.timer.theme.slice(1)}`;
     const cornersBtn = qa('[data-action="toggle-corners"]');
     if (cornersBtn) cornersBtn.textContent = `Corners: ${this.timer.cornerStyle === CornerStyle.Rounded ? "Rounded" : "Boxy"}`;
     const gridBtn = qa("#btn-grid");
     if (gridBtn) gridBtn.textContent = `Grid: ${this.layout.gridCols}×${this.layout.gridRows}`;
-    // active display mode highlight
     for (const a of ["progress", "popup", "both"] as const) {
       const btn = qa(`[data-action="mode-${a}"]`);
       if (!btn) continue;
       const isActive = (a === "progress" && this.timer.displayMode === DisplayMode.ProgressBar) || (a === "popup" && this.timer.displayMode === DisplayMode.TimerPopup) || (a === "both" && this.timer.displayMode === DisplayMode.Both);
       btn.classList.toggle("btn-accent", isActive);
     }
+    this.renderHistoryStats();
+    this.renderFocusChart();
+  }
+
+  private renderHistoryStats(): void {
+    const el = this.deps.settingsDialog.querySelector("#history-stats") as HTMLElement | null;
+    if (!el) return;
+    try {
+      const { getHistory } = require("./history.ts") as { getHistory: () => { getStats: () => { todayPomodoros: number; todayFocusAvg: number; totalPomodoros: number; streak: number } } };
+      const s = getHistory().getStats();
+      el.textContent = `Today: ${s.todayPomodoros} pomodoros · Focus ${s.todayFocusAvg}% · Streak ${s.streak} · Total ${s.totalPomodoros}`;
+    } catch {
+      try {
+        const raw = localStorage.getItem("pomodoro.history.v1");
+        const arr = raw ? JSON.parse(raw) as { phase: string; completed: boolean; startedAt: number }[] : [];
+        const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+        const today = arr.filter((r) => r.phase === "pomodoro" && r.completed && r.startedAt >= todayStart.getTime()).length;
+        el.textContent = `Today: ${today} pomodoros · Total ${arr.filter((r) => r.phase === "pomodoro" && r.completed).length}`;
+      } catch { el.textContent = ""; }
+    }
+  }
+
+  private renderFocusChart(): void {
+    const canvas = this.deps.settingsDialog.querySelector("#focus-chart") as HTMLCanvasElement | null;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    let samples: { t: number; score: number }[] = [];
+    try {
+      const { getHistory } = require("./history.ts") as { getHistory: () => { getRecentFocus: (m: number) => { t: number; score: number }[] } };
+      samples = getHistory().getRecentFocus(10);
+    } catch {
+      try {
+        const raw = localStorage.getItem("pomodoro.focus.v1");
+        samples = raw ? JSON.parse(raw) as { t: number; score: number }[] : [];
+        const cutoff = Date.now() - 10 * 60 * 1000;
+        samples = samples.filter((s) => s.t >= cutoff);
+      } catch { samples = []; }
+    }
+    const w = canvas.width, h = canvas.height;
+    ctx.clearRect(0, 0, w, h);
+    ctx.fillStyle = "#1e1e22";
+    ctx.fillRect(0, 0, w, h);
+    if (samples.length < 2) {
+      ctx.fillStyle = "#888"; ctx.font = "12px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("No focus data yet — start a session", w / 2, h / 2);
+      return;
+    }
+    const minT = samples[0]!.t, maxT = samples[samples.length - 1]!.t || minT + 1;
+    const range = Math.max(1, maxT - minT);
+    ctx.strokeStyle = "#78a0ff"; ctx.lineWidth = 2; ctx.beginPath();
+    samples.forEach((s, i) => {
+      const x = ((s.t - minT) / range) * (w - 8) + 4;
+      const y = h - 4 - (s.score / 100) * (h - 8);
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    });
+    ctx.stroke();
+    // threshold lines
+    ctx.strokeStyle = "rgba(120,220,120,0.4)"; ctx.setLineDash([4, 4]); ctx.beginPath(); ctx.moveTo(0, h - 4 - 0.7 * (h - 8)); ctx.lineTo(w, h - 4 - 0.7 * (h - 8)); ctx.stroke();
+    ctx.strokeStyle = "rgba(230,80,80,0.4)"; ctx.beginPath(); ctx.moveTo(0, h - 4 - 0.35 * (h - 8)); ctx.lineTo(w, h - 4 - 0.35 * (h - 8)); ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  private exportHistory(format: "json" | "csv"): void {
+    let content = "", mime = "application/json", ext = "json";
+    try {
+      const { getHistory } = require("./history.ts") as { getHistory: () => { exportJSON: () => string; exportCSV: () => string } };
+      const h = getHistory();
+      content = format === "csv" ? h.exportCSV() : h.exportJSON();
+      mime = format === "csv" ? "text/csv" : "application/json";
+      ext = format;
+    } catch {
+      content = localStorage.getItem("pomodoro.history.v1") || "[]";
+    }
+    const blob = new Blob([content], { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = `pomodoro-history.${ext}`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  private clearHistory(): void {
+    try {
+      const { getHistory } = require("./history.ts") as { getHistory: () => { clear: () => void } };
+      getHistory().clear();
+    } catch {
+      try { localStorage.removeItem("pomodoro.history.v1"); localStorage.removeItem("pomodoro.focus.v1"); } catch {}
+    }
+    this.syncSettingsUI();
+    this.showToast("History cleared");
   }
 
   bindOnboardingUI(): void {
@@ -600,10 +741,46 @@ export class PomodoroApp {
   private visionBusy = false;
   private lastVisionTs = 0;
   private visionIntervalMs = 66; // ~15 fps vision, render stays 60fps
+  private lastFocusSampleTs = 0;
+  private embedResizeObserver: ResizeObserver | null = null;
+
+  private setupEmbedBridge(): void {
+    // postMessage bridge for embed hosts
+    window.addEventListener("message", (e) => {
+      const d = e.data as { type?: string; action?: string };
+      if (d?.type === "pomodoro:cmd") {
+        if (d.action === "start") this.timer.startTimer();
+        else if (d.action === "pause") this.timer.stopTimer();
+        else if (d.action === "reset") this.timer.resetTimer();
+        else if (d.action === "toggle") this.timer.toggleTimer();
+      }
+    });
+    // ResizeObserver for responsive embed
+    try {
+      this.embedResizeObserver = new ResizeObserver(() => this.handleResize());
+      this.embedResizeObserver.observe(this.deps.stageInner);
+    } catch {}
+    // focus trap for dialog
+    this.deps.settingsDialog.addEventListener("keydown", (e) => {
+      if (e.key !== "Tab") return;
+      const focusable = [...this.deps.settingsDialog.querySelectorAll<HTMLElement>('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])')].filter((el) => !el.hasAttribute("disabled"));
+      if (!focusable.length) return;
+      const first = focusable[0]!, last = focusable[focusable.length - 1]!;
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+    });
+    // volume slider
+    this.deps.settingsDialog.querySelector("#volume-slider")?.addEventListener("input", (e) => {
+      const v = parseInt((e.target as HTMLInputElement).value, 10);
+      this.timer.volume = Math.max(0, Math.min(1, v / 100));
+      this.timer.saveSettings();
+      const out = this.deps.settingsDialog.querySelector("#out-volume") as HTMLElement | null;
+      if (out) out.textContent = `${v}%`;
+    });
+  }
 
   async tick(): Promise<void> {
     this.timer.updateTimer();
-    // Vision: non-blocking, throttled by time + busy flag — never stalls render
     const now = performance.now();
     const canRunVision = this.timer.cameraEnabled && this.deps.video.readyState >= 2 && !!this.stream
       && !this.visionBusy && (now - this.lastVisionTs >= this.visionIntervalMs);
@@ -613,7 +790,29 @@ export class PomodoroApp {
       const c = this.visionEveryN;
       this.vision.analyze(this.deps.video, this.timer.isRunning, c).then((score) => {
         this.timer.focusScore = score;
+        this.timer.sampleFocus(score);
         this.timer.focusState = this.vision.classify(score, this.timer.isRunning);
+        // emit focus for embed hosts
+        try {
+          window.dispatchEvent(new CustomEvent("pomodoro:focus", { detail: { score, state: this.timer.focusState } }));
+          window.parent?.postMessage({ type: "pomodoro:focus", score, state: this.timer.focusState }, "*");
+        } catch {}
+        // throttle focus samples to 1Hz
+        if (now - this.lastFocusSampleTs >= 1000) {
+          this.lastFocusSampleTs = now;
+          try {
+            const { getHistory } = require("./history.ts") as { getHistory: () => { addFocusSample: (s: number) => void } };
+            getHistory().addFocusSample(score);
+          } catch {
+            try {
+              const key = "pomodoro.focus.v1";
+              const raw = localStorage.getItem(key);
+              const arr = raw ? JSON.parse(raw) as { t: number; score: number }[] : [];
+              arr.push({ t: Date.now(), score });
+              localStorage.setItem(key, JSON.stringify(arr.slice(-600)));
+            } catch {}
+          }
+        }
       }).catch(() => {}).finally(() => { this.visionBusy = false; });
     } else if (!this.timer.cameraEnabled) {
       this.timer.focusState = FocusState.Neutral; this.timer.focusScore = 0;
@@ -625,13 +824,13 @@ export class PomodoroApp {
     this.handleResize();
     this.renderOnboarding();
     this.renderHtmlTiles();
+    this.setupEmbedBridge();
     await this.startCamera().catch(() => {});
-    // Visibility-aware loop — pause vision when tab hidden
     let hidden = document.hidden;
     document.addEventListener("visibilitychange", () => { hidden = document.hidden; });
     const loop = async (): Promise<void> => {
       if (!hidden) await this.tick();
-      else this.draw(); // still draw timer even when hidden
+      else this.draw();
       this.rafId = requestAnimationFrame(() => { void loop(); });
     };
     void loop();
@@ -639,6 +838,7 @@ export class PomodoroApp {
 
   dispose(): void {
     cancelAnimationFrame(this.rafId);
+    this.embedResizeObserver?.disconnect();
     this.stopCamera();
   }
 }

@@ -38,7 +38,30 @@ async function boot(): Promise<void> {
 
   const app = new PomodoroApp({ video, canvas, stageInner, layoutLayer, cameraOffEl, settingsDialog, onboardingEl });
 
-  // Handle camera permission prompt early so overlay sizes correctly
+  // PWA: register service worker
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+  }
+
+  // ARIA live region for timer/focus
+  const liveRegion = document.getElementById("live-region");
+  let lastAnnounce = 0;
+  window.addEventListener("pomodoro:phase", () => {
+    if (!liveRegion) return;
+    const now = Date.now();
+    if (now - lastAnnounce < 3000) return;
+    lastAnnounce = now;
+    liveRegion.textContent = `${app.timer.currentPhase} ${app.timer.timerText}`;
+  });
+
+  // Global error boundary
+  window.addEventListener("error", (e) => {
+    console.error("Pomodoro error", e.error || e.message);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    console.error("Pomodoro rejection", e.reason);
+  });
+
   await app.run();
 
   // expose for debugging / parity with Python console logs

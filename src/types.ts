@@ -60,4 +60,10 @@ export interface AppSettings {
   theme: ThemeName;
   cornerStyle: CornerStyle;
   alertsEnabled: boolean;
+  longBreakMinutes?: number;
+  pomodorosBeforeLongBreak?: number;
+  autoStartBreak?: boolean;
+  autoStartPomodoro?: boolean;
+  notificationsEnabled?: boolean;
+  volume?: number;
 }
