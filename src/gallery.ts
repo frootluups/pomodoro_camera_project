@@ -3,11 +3,11 @@ import type { BBox } from "./types.ts";
 
 function histEmbedding(imageData: ImageData): Float32Array | null {
   if (imageData.width < 8 || imageData.height < 8) return null;
-  // Build 3×16 HSV histogram (approx via RGB → HSV per pixel)
   const bins = 16;
   const hist = new Float32Array(bins * 3);
   const d = imageData.data;
-  for (let i = 0; i < d.length; i += 4) {
+  // Sample every 2nd pixel (stride 8) — 2× fewer ops, ~same accuracy for 48×48
+  for (let i = 0; i < d.length; i += 8) {
     const r = d[i]! / 255, g = d[i + 1]! / 255, b = d[i + 2]! / 255;
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
     const delta = max - min;
@@ -50,16 +50,27 @@ export class FaceGallery {
     this.thresh = thresh; this.maxGallery = maxGallery;
   }
 
+  private embedCanvas: HTMLCanvasElement | null = null;
+  private embedCtx: CanvasRenderingContext2D | null = null;
+
+  private getEmbedCanvas(): CanvasRenderingContext2D | null {
+    if (!this.embedCanvas) {
+      this.embedCanvas = document.createElement("canvas");
+      this.embedCanvas.width = 48; this.embedCanvas.height = 48;
+      this.embedCtx = this.embedCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    return this.embedCtx;
+  }
+
   embedFromCanvas(src: HTMLCanvasElement | OffscreenCanvas, bbox: BBox): Float32Array | null {
     const [x, y, w, h] = bbox;
     if (w < 12 || h < 12) return null;
-    const c = document.createElement("canvas");
-    c.width = 48; c.height = 48;
-    const ctx = c.getContext("2d");
+    const ctx = this.getEmbedCanvas();
     if (!ctx) return null;
     const sx = Math.max(0, x), sy = Math.max(0, y);
     const sw = Math.min(src.width - sx, w), sh = Math.min(src.height - sy, h);
     if (sw <= 0 || sh <= 0) return null;
+    ctx.clearRect(0, 0, 48, 48);
     ctx.drawImage(src as unknown as CanvasImageSource, sx, sy, sw, sh, 0, 0, 48, 48);
     const data = ctx.getImageData(0, 0, 48, 48);
     return histEmbedding(data);

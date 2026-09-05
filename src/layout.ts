@@ -62,6 +62,8 @@ export class LayoutManager {
   config: LayoutConfig;
   gridCols: number;
   gridRows: number;
+  private rectCache = new Map<string, [number, number, number, number]>();
+  private rectCacheKey = "";
 
   constructor(config: LayoutConfig) {
     this.config = config;
@@ -72,9 +74,16 @@ export class LayoutManager {
   setGrid(cols: number, rows: number): void {
     this.gridCols = cols; this.gridRows = rows;
     this.config.gridCols = cols; this.config.gridRows = rows;
+    this.rectCache.clear(); this.rectCacheKey = "";
   }
 
   getElementRect(name: string, frameW: number, frameH: number, includeDisabled = false): [number, number, number, number] {
+    const key = `${name}|${frameW}|${frameH}|${includeDisabled ? 1 : 0}|${this.gridCols}|${this.gridRows}`;
+    // Invalidate cache when frame size changes
+    const frameKey = `${frameW}|${frameH}|${this.gridCols}|${this.gridRows}`;
+    if (frameKey !== this.rectCacheKey) { this.rectCache.clear(); this.rectCacheKey = frameKey; }
+    const cached = this.rectCache.get(key);
+    if (cached) return cached;
     const elem = this.config.elements[name];
     if (!elem || (!elem.enabled && !includeDisabled)) return [0, 0, 0, 0];
     const cellW = frameW / this.gridCols;
@@ -85,7 +94,9 @@ export class LayoutManager {
     const h = Math.min(Math.round(elem.height * cellH), frameH - 2 * marginPx);
     const x = Math.max(marginPx, Math.min(Math.round(elem.x * cellW), frameW - w - marginPx));
     const y = Math.max(marginPx, Math.min(Math.round(elem.y * cellH), frameH - h - marginPx));
-    return [x + paddingPx, y + paddingPx, x + w - paddingPx, y + h - paddingPx];
+    const rect: [number, number, number, number] = [x + paddingPx, y + paddingPx, x + w - paddingPx, y + h - paddingPx];
+    if (this.rectCache.size < 32) this.rectCache.set(key, rect);
+    return rect;
   }
 
   updateElement(name: string, patch: Partial<UIElementConfig>): void {

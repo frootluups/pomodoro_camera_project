@@ -70,7 +70,12 @@ export class PomodoroApp {
     this.bindKeys();
     this.bindCanvasDrag();
     this.applyTheme();
-    window.addEventListener("resize", () => this.handleResize());
+    // Debounced resize — avoid thrashing on drag-resize
+    let resizeTimer: number | null = null;
+    window.addEventListener("resize", () => {
+      if (resizeTimer !== null) cancelAnimationFrame(resizeTimer);
+      resizeTimer = requestAnimationFrame(() => { this.handleResize(); resizeTimer = null; });
+    });
   }
 
   private qs<T extends HTMLElement>(id: string): T | null {
@@ -465,11 +470,22 @@ export class PomodoroApp {
     const txt = this.timer.timerText;
     const { text: phase } = this.timer.resolvePhase();
     this.ctx.save();
-    // auto-fit font
+    // auto-fit font — binary search instead of linear decrement
     const maxPx = Math.min(72, bh * 0.55) * el.fontScale * uiScale;
     let px = Math.max(10, maxPx);
+    // Quick check: if max fits, skip loop
     this.ctx.font = `700 ${px}px 'Segoe UI', sans-serif`;
-    while (this.ctx.measureText(txt).width > bw - 12 && px > 10) { px -= 1; this.ctx.font = `700 ${px}px 'Segoe UI', sans-serif`; }
+    if (this.ctx.measureText(txt).width > bw - 12) {
+      let lo = 10, hi = px, best = 10;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        this.ctx.font = `700 ${mid}px 'Segoe UI', sans-serif`;
+        if (this.ctx.measureText(txt).width <= bw - 12) { best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+      px = best;
+      this.ctx.font = `700 ${px}px 'Segoe UI', sans-serif`;
+    }
     if (this.timer.theme === ThemeName.XP) {
       const tbH = Math.max(18, bh * 0.26);
       drawXpTitleBar(this.ctx, x1, y1, x2, y1 + tbH, phase);
@@ -505,7 +521,20 @@ export class PomodoroApp {
     this.ctx.save();
     const h = y2 - y1; let px = Math.max(10, h * 0.5 * uiScale);
     this.ctx.font = `600 ${px}px 'Segoe UI', sans-serif`;
-    while (this.ctx.measureText(txt).width > (x2 - x1) - 14 && px > 8) { px -= 0.5; this.ctx.font = `600 ${px}px 'Segoe UI', sans-serif`; }
+    if (this.ctx.measureText(txt).width > (x2 - x1) - 14) {
+      let lo = 16, hi = Math.round(px * 2), best = 8;
+      // Binary search for fitting size (px is float, search integer*0.5 steps)
+      lo = 16; hi = Math.round(px * 2);
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        const testPx = mid * 0.5;
+        this.ctx.font = `600 ${testPx}px 'Segoe UI', sans-serif`;
+        if (this.ctx.measureText(txt).width <= (x2 - x1) - 14) { best = mid; lo = mid + 1; }
+        else hi = mid - 1;
+      }
+      px = Math.max(8, best * 0.5);
+      this.ctx.font = `600 ${px}px 'Segoe UI', sans-serif`;
+    }
     const tw = this.ctx.measureText(txt).width, th = px * 0.9;
     const pillW = tw + 14, pillH = th + 8;
     const px1 = x1 + 4, py1 = y1 + (y2 - y1 - pillH) / 2;

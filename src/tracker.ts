@@ -128,10 +128,11 @@ export class MultiPersonTracker {
       this.tracks.set(pid, { pid, bbox: d, smooth: [x, y, x + w, y + h], color, hits: 1, misses: 0, lastUpdate: frameIdx, gid: null, label: "" });
     }
 
+    const matchedPids = new Set(matches.map(([m]) => m));
     const toDel: number[] = [];
     for (const [pid, trk] of this.tracks) {
-      if (usedTrk.has(pid)) continue;
-      if (!matches.some(([m]) => m === pid) && trk.lastUpdate !== frameIdx) {
+      if (usedTrk.has(pid) || matchedPids.has(pid)) continue;
+      if (trk.lastUpdate !== frameIdx) {
         trk.misses += 1;
         if (trk.misses > this.maxMiss) toDel.push(pid);
       }

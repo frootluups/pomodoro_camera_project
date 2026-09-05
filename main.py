@@ -233,19 +233,16 @@ class MultiPersonTracker:
             color = _PERSON_PALETTE[(pid - 1) % len(_PERSON_PALETTE)]
             self.tracks[pid] = TrackedPerson(pid=pid, bbox=d, smooth=(x, y, x + w, y + h), color=color, hits=1, misses=0, last_update=frame_idx)
 
-        # age unmatched tracks
+        # age unmatched tracks — use set for O(1) lookup, skip newly created
+        matched_pids = {m[0] for m in matches}
         to_del: list[int] = []
         for pid, trk in self.tracks.items():
-            if pid in used_trk:
+            if pid in used_trk or pid in matched_pids:
                 continue
-            # not matched this frame — if it wasn't in matches but was existing, it stays unmatched
-            # check if this pid was matched — if not, increment misses
-            if pid not in [m[0] for m in matches]:
-                # also skip newly created tracks (they were just added)
-                if trk.last_update != frame_idx:
-                    trk.misses += 1
-                    if trk.misses > self.max_miss:
-                        to_del.append(pid)
+            if trk.last_update != frame_idx:
+                trk.misses += 1
+                if trk.misses > self.max_miss:
+                    to_del.append(pid)
         for pid in to_del:
             del self.tracks[pid]
 
@@ -460,6 +457,10 @@ _FONT_PATHS: tuple[str | None, str | None] = _resolve_font_paths() if _PIL_AVAIL
 _FONT_CACHE: dict[tuple[int, bool], Any] = {}
 _TEXT_SIZE_CACHE: dict[tuple[str, int, bool], tuple[int, int]] = {}
 _FIT_TEXT_CACHE: dict[tuple[str, int, int, int, bool], tuple[int, tuple[int, int]]] = {}
+_TEXT_MASK_CACHE: dict[tuple[str, int, bool, int], tuple[np.ndarray, int, int]] = {}
+_TEXT_MASK_CACHE_MAX: Final = 256
+_DRAW_TEXT_PATCH_CACHE: dict[tuple[str, int, bool, tuple[int, int, int], int, tuple[int, int, int]], tuple[np.ndarray, np.ndarray]] = {}
+_DRAW_TEXT_PATCH_CACHE_MAX: Final = 128
 # Reusable dummy for text measurement — avoids per-call Image allocation
 _DUMMY_IMG: Any = Image.new("RGB", (1, 1)) if _PIL_AVAILABLE else None  # type: ignore[assignment]
 _DUMMY_DRAW: Any = ImageDraw.Draw(_DUMMY_IMG) if _PIL_AVAILABLE and _DUMMY_IMG is not None else None  # type: ignore[assignment]
@@ -467,6 +468,9 @@ _DUMMY_DRAW: Any = ImageDraw.Draw(_DUMMY_IMG) if _PIL_AVAILABLE and _DUMMY_IMG i
 _H_GRAD_CACHE: dict[tuple[int, tuple[int, int, int], tuple[int, int, int]], np.ndarray] = {}
 _V_GRAD_CACHE: dict[tuple[int, tuple[int, int, int], tuple[int, int, int]], np.ndarray] = {}
 _GRAD_CACHE_MAX: Final = 64
+_H_GRAD_SHRINK_CACHE: dict[tuple[int, int], np.ndarray] = {}
+_XP_BTN_CACHE: dict[tuple[int, bool, bool], tuple[np.ndarray, np.ndarray]] = {}
+_XP_PROG_CACHE: dict[int, np.ndarray] = {}
 
 
 def get_font(px: int, bold: bool = False) -> Any:
@@ -504,29 +508,65 @@ def text_size(text: str, px: int, bold: bool = False) -> tuple[int, int]:
 
 
 def _alpha_blend_roi(img: np.ndarray, x1: int, y1: int, x2: int, y2: int, color: tuple[int, int, int], alpha: float, radius: int = 0) -> None:
-    """Efficient translucent fill — only touches ROI, no full-frame copy."""
+    """Efficient translucent fill — only touches ROI, no full-frame copy. Integer fast path."""
     ih, iw = img.shape[:2]
     x1c, y1c, x2c, y2c = max(0, x1), max(0, y1), min(iw, x2), min(ih, y2)
     if x2c <= x1c or y2c <= y1c:
         return
+    # Clamp alpha and use integer math (0-256) to avoid float32 per pixel
+    a_int = max(0, min(256, int(round(alpha * 256))))
+    if a_int == 0:
+        return
+    if a_int >= 256:
+        # Opaque — just fill
+        if radius <= 0:
+            img[y1c:y2c, x1c:x2c] = color
+        else:
+            w, h = x2c - x1c, y2c - y1c
+            tmp = np.zeros((h, w, 3), dtype=np.uint8)
+            styled_rect(tmp, 0, 0, w, h, fill=color, radius=radius)
+            mask = np.zeros((h, w), dtype=np.uint8)
+            styled_rect(mask, 0, 0, w, h, fill=(255, 255, 255), radius=radius)  # type: ignore[arg-type]
+            roi = img[y1c:y2c, x1c:x2c]
+            # Use mask as alpha: where mask==255, copy tmp; else keep roi
+            # For opaque rounded, just copy where mask set
+            roi[mask == 255] = tmp[mask == 255]
+        return
+    inv_a = 256 - a_int
     if radius <= 0:
         roi = img[y1c:y2c, x1c:x2c]
-        # Blend in-place: dst = src * (1-alpha) + color * alpha
-        # Use cv2.addWeighted on ROI only — no full-frame allocation
-        overlay = np.full_like(roi, color)
-        cv2.addWeighted(overlay, alpha, roi, 1 - alpha, 0, roi)
+        # Integer lerp: dst = (src*inv_a + color*a_int) >> 8 — vectorized, no per-channel loop
+        c_arr = np.array(color, dtype=np.uint16).reshape(1, 1, 3)
+        roi[:] = ((roi.astype(np.uint16) * inv_a + c_arr * a_int) >> 8).astype(np.uint8)
     else:
-        # For rounded, draw to temp ROI then blend
         w, h = x2c - x1c, y2c - y1c
-        tmp = np.zeros((h, w, 3), dtype=np.uint8)
-        styled_rect(tmp, 0, 0, w, h, fill=color, radius=radius)
-        # Create mask for rounded shape
-        mask = np.zeros((h, w), dtype=np.uint8)
-        styled_rect(mask, 0, 0, w, h, fill=(255, 255, 255), radius=radius)  # type: ignore[arg-type]
-        # Blend only where mask is set
+        # Cache rounded mask for common sizes to avoid recomputing styled_rect
+        # Use simple key: (w,h,radius)
+        cache_key = (w, h, radius)
+        # Use global cache dict for rounded masks
+        if not hasattr(_alpha_blend_roi, "_mask_cache"):  # type: ignore[attr-defined]
+            _alpha_blend_roi._mask_cache = {}  # type: ignore[attr-defined]
+            _alpha_blend_roi._tmp_cache = {}  # type: ignore[attr-defined]
+        mask_cache: dict = _alpha_blend_roi._mask_cache  # type: ignore[attr-defined]
+        tmp_cache: dict = _alpha_blend_roi._tmp_cache  # type: ignore[attr-defined]
+        mask = mask_cache.get(cache_key)
+        if mask is None:
+            mask = np.zeros((h, w), dtype=np.uint8)
+            styled_rect(mask, 0, 0, w, h, fill=(255, 255, 255), radius=radius)  # type: ignore[arg-type]
+            if len(mask_cache) < 32:
+                mask_cache[cache_key] = mask
+        tmp = tmp_cache.get((cache_key, color))
+        if tmp is None:
+            tmp = np.zeros((h, w, 3), dtype=np.uint8)
+            styled_rect(tmp, 0, 0, w, h, fill=color, radius=radius)
+            if len(tmp_cache) < 32:
+                tmp_cache[(cache_key, color)] = tmp
         roi = img[y1c:y2c, x1c:x2c]
-        alpha_mask = (mask.astype(np.float32) / 255.0 * alpha)[:, :, None]
-        roi[:] = (roi.astype(np.float32) * (1 - alpha_mask) + tmp.astype(np.float32) * alpha_mask).astype(np.uint8)
+        # Integer alpha mask: mask is 0 or 255, so effective alpha = (mask * a_int) >> 8
+        eff_a = (mask.astype(np.uint16) * a_int) >> 8  # 0..a_int, shape HxW
+        eff3 = eff_a[:, :, None]  # HxWx1 broadcast to 3 channels
+        inv3 = (256 - eff3).astype(np.uint16)
+        roi[:] = ((roi.astype(np.uint16) * inv3 + tmp.astype(np.uint16) * eff3) >> 8).astype(np.uint8)
 
 
 def draw_text(
@@ -592,6 +632,71 @@ def draw_text(
     y1 = int(min(h, math.ceil(ay + th)) + pad)
     if x1 <= x0 or y1 <= y0:
         return
+
+    # Fast path: cache rendered text patch for repeated draws (timer, labels)
+    # Key includes text, size, color, stroke — covers 90% of per-frame draws
+    if stroke <= 1 and tw < 300 and th < 80:
+        cache_key = (text, px, bold, color, stroke, stroke_color)
+        cached = _DRAW_TEXT_PATCH_CACHE.get(cache_key)
+        if cached is not None:
+            patch_rgb, patch_alpha = cached
+            ph, pw = patch_alpha.shape[:2]
+            # Patch was rendered at exact tw x th, centered in padded region
+            # Recompute placement: patch covers [ax, ax+tw) x [ay, ay+th)
+            px0 = int(math.floor(ax))
+            py0 = int(math.floor(ay))
+            # Clip to image
+            cx0, cy0 = max(0, px0), max(0, py0)
+            cx1, cy1 = min(w, px0 + pw), min(h, py0 + ph)
+            if cx1 > cx0 and cy1 > cy0:
+                sx0, sy0 = cx0 - px0, cy0 - py0
+                sx1, sy1 = sx0 + (cx1 - cx0), sy0 + (cy1 - cy0)
+                roi = img[cy0:cy1, cx0:cx1]
+                pr = patch_rgb[sy0:sy1, sx0:sx1]
+                pa = patch_alpha[sy0:sy1, sx0:sx1]
+                if np.any(pa):
+                    # vectorized 3-channel blend — single allocation, no per-channel loop
+                    a3 = pa.astype(np.uint16)[:, :, None]
+                    inv3 = (255 - a3)
+                    roi[:] = ((roi.astype(np.uint16) * inv3 + pr.astype(np.uint16) * a3) // 255).astype(np.uint8)
+                return
+        # Cache miss — render and store
+        # Render text to small RGBA patch at exact size
+        # Use PIL to render white text on transparent, then colorize
+        patch_w, patch_h = tw + 2 * stroke + 2, th + 2 * stroke + 2
+        if patch_w > 0 and patch_h > 0 and patch_w < 400 and patch_h < 120:
+            try:
+                tmp_img = Image.new("RGBA", (patch_w, patch_h), (0, 0, 0, 0))  # type: ignore[union-attr]
+                tmp_draw = ImageDraw.Draw(tmp_img)  # type: ignore[union-attr]
+                tx, ty = 1 + stroke, 1 + stroke
+                if stroke > 0:
+                    tmp_draw.text((tx, ty), text, font=font, fill=(int(color[2]), int(color[1]), int(color[0]), 255), stroke_width=stroke, stroke_fill=(int(stroke_color[2]), int(stroke_color[1]), int(stroke_color[0]), 255))
+                else:
+                    tmp_draw.text((tx, ty), text, font=font, fill=(int(color[2]), int(color[1]), int(color[0]), 255))
+                arr = np.array(tmp_img)
+                # arr is RGBA, need BGR + alpha
+                patch_rgb = arr[:, :, :3][:, :, ::-1].copy()  # RGBA->BGR
+                patch_alpha = arr[:, :, 3].copy()
+                if len(_DRAW_TEXT_PATCH_CACHE) < _DRAW_TEXT_PATCH_CACHE_MAX:
+                    _DRAW_TEXT_PATCH_CACHE[cache_key] = (patch_rgb, patch_alpha)
+                # Now blend this patch at (ax, ay)
+                px0 = int(math.floor(ax))
+                py0 = int(math.floor(ay))
+                cx0, cy0 = max(0, px0), max(0, py0)
+                cx1, cy1 = min(w, px0 + patch_w), min(h, py0 + patch_h)
+                if cx1 > cx0 and cy1 > cy0:
+                    sx0, sy0 = cx0 - px0, cy0 - py0
+                    sx1, sy1 = sx0 + (cx1 - cx0), sy0 + (cy1 - cy0)
+                    roi = img[cy0:cy1, cx0:cx1]
+                    pr = patch_rgb[sy0:sy1, sx0:sx1]
+                    pa = patch_alpha[sy0:sy1, sx0:sx1]
+                    if np.any(pa):
+                        a3 = pa.astype(np.uint16)[:, :, None]
+                        inv3 = (255 - a3)
+                        roi[:] = ((roi.astype(np.uint16) * inv3 + pr.astype(np.uint16) * a3) // 255).astype(np.uint8)
+                    return
+            except Exception:
+                pass
 
     region = np.ascontiguousarray(img[y0:y1, x0:x1])
     pil = Image.fromarray(region[:, :, ::-1])  # type: ignore[union-attr]
@@ -841,10 +946,15 @@ def _h_gradient(
             _H_GRAD_CACHE[key] = cols
     if radius > 0:
         r = min(radius, w // 2, h // 2)
-        centers = np.arange(w, dtype=np.float32)
-        edge_dist = np.minimum(centers, w - 1 - centers)
-        shrink = (r - np.sqrt(np.maximum(0, r * r - np.maximum(0, r - edge_dist) ** 2))).astype(np.int32)
-        shrink = np.where(edge_dist < r, shrink, 0)
+        shrink_key = (w, r)
+        shrink = _H_GRAD_SHRINK_CACHE.get(shrink_key)
+        if shrink is None:
+            centers = np.arange(w, dtype=np.float32)
+            edge_dist = np.minimum(centers, w - 1 - centers)
+            shrink = (r - np.sqrt(np.maximum(0, r * r - np.maximum(0, r - edge_dist) ** 2))).astype(np.int32)
+            shrink = np.where(edge_dist < r, shrink, 0)
+            if len(_H_GRAD_SHRINK_CACHE) < 32:
+                _H_GRAD_SHRINK_CACHE[shrink_key] = shrink
         for i in range(w):
             gx = x1 + i
             if gx < cx1 or gx >= cx2:
@@ -919,14 +1029,21 @@ def _xp_button(
         c_top, c_bot = (240, 235, 225), (210, 205, 195)
     hi, sh, dk = (255, 255, 255), (105, 105, 105), (60, 60, 60)
 
-    # fast gradient fill — two vertical gradients blitted via numpy
-    c1 = np.array(c_top, dtype=np.float32)
-    c2 = np.array(c_bot, dtype=np.float32)
-    half_h = bh // 2
-    t1 = np.linspace(0, 1, half_h, dtype=np.float32) if half_h > 0 else np.array([0.0], dtype=np.float32)
-    t2 = np.linspace(0, 1, bh - half_h, dtype=np.float32) if bh - half_h > 0 else np.array([0.0], dtype=np.float32)
-    top_cols = (c1 + np.outer(t1, c2 - c1)).clip(0, 255).astype(np.uint8)
-    bot_cols = (c2 + np.outer(t2, c1 - c2)).clip(0, 255).astype(np.uint8)
+    # fast gradient fill — cached vertical gradients
+    cache_key = (bh, c_top, c_bot)
+    cached = _XP_BTN_CACHE.get(cache_key)
+    if cached is not None:
+        top_cols, bot_cols = cached
+    else:
+        c1 = np.array(c_top, dtype=np.float32)
+        c2 = np.array(c_bot, dtype=np.float32)
+        half_h = bh // 2
+        t1 = np.linspace(0, 1, half_h, dtype=np.float32) if half_h > 0 else np.array([0.0], dtype=np.float32)
+        t2 = np.linspace(0, 1, bh - half_h, dtype=np.float32) if bh - half_h > 0 else np.array([0.0], dtype=np.float32)
+        top_cols = (c1 + np.outer(t1, c2 - c1)).clip(0, 255).astype(np.uint8)
+        bot_cols = (c2 + np.outer(t2, c1 - c2)).clip(0, 255).astype(np.uint8)
+        if len(_XP_BTN_CACHE) < 32:
+            _XP_BTN_CACHE[cache_key] = (top_cols, bot_cols)
     ih, iw = img.shape[:2]
     x1i, x2i = x1 + 2, x2 - 3
     y1i, ym, y2i = y1 + 2, y1 + 2 + half_h, y2 - 2
@@ -1011,12 +1128,16 @@ def _xp_progress_bar(img: np.ndarray, x1: int | float, y1: int | float, x2: int 
     if progress > 0:
         fill_w = max(4, int(pw * min(1.0, progress)))
         fx2 = x1 + fill_w
-        c1 = np.array([110, 210, 80], dtype=np.float32)
-        c2 = np.array([50, 160, 20], dtype=np.float32)
         gh = ph - 4
         if gh > 0:
-            t = np.linspace(0, 1, gh, dtype=np.float32)
-            cols = (c1 + np.outer(t, c2 - c1)).clip(0, 255).astype(np.uint8)
+            cols = _XP_PROG_CACHE.get(gh)
+            if cols is None:
+                c1 = np.array([110, 210, 80], dtype=np.float32)
+                c2 = np.array([50, 160, 20], dtype=np.float32)
+                t = np.linspace(0, 1, gh, dtype=np.float32)
+                cols = (c1 + np.outer(t, c2 - c1)).clip(0, 255).astype(np.uint8)
+                if len(_XP_PROG_CACHE) < 32:
+                    _XP_PROG_CACHE[gh] = cols
             # fast blit
             ih, iw = img.shape[:2]
             y1i, y2i = y1 + 2, y1 + 2 + gh

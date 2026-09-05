@@ -187,16 +187,17 @@ export class VisionEngine {
     if (!isRunning) { this.prevSmall = cur; this.smoothScore = null; return 0; }
     if (!this.prevSmall) { this.prevSmall = cur; return this.lastFaces.length ? 100 : 25; }
 
-    // motion = mean absdiff / 255
+    // motion = mean absdiff / 255 — integer luma (77,150,29)>>8 ≈ 0.299,0.587,0.114, sample every 2nd pixel
     let sum = 0;
+    let sampled = 0;
     const a = this.prevSmall.data, b = cur.data;
-    for (let i = 0; i < a.length; i += 4) {
-      // grayscale approx: 0.299R+0.587G+0.114B but data is RGBA of small canvas drawn from video (already color)
-      const ga = (a[i]! * 0.299 + a[i + 1]! * 0.587 + a[i + 2]! * 0.114);
-      const gb = (b[i]! * 0.299 + b[i + 1]! * 0.587 + b[i + 2]! * 0.114);
+    for (let i = 0; i < a.length; i += 8) {
+      const ga = (a[i]! * 77 + a[i + 1]! * 150 + a[i + 2]! * 29) >> 8;
+      const gb = (b[i]! * 77 + b[i + 1]! * 150 + b[i + 2]! * 29) >> 8;
       sum += Math.abs(ga - gb);
+      sampled++;
     }
-    const motion = sum / (cur.width * cur.height) / 255;
+    const motion = sum / Math.max(1, sampled) / 255;
     this.motion = motion;
     this.prevSmall = cur;
 

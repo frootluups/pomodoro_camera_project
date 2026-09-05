@@ -1,8 +1,14 @@
 // src/render.ts — Canvas 2D equivalents of styled_rect, gradients, xp chrome from main.py
 import type { RGB } from "./types.ts";
 
+const _cssCache = new Map<string, string>();
 function cssRgb([r, g, b]: RGB, a = 1): string {
-  return a >= 1 ? `rgb(${r} ${g} ${b})` : `rgba(${r},${g},${b},${a})`;
+  const key = `${r},${g},${b},${a}`;
+  let v = _cssCache.get(key);
+  if (v) return v;
+  v = a >= 1 ? `rgb(${r} ${g} ${b})` : `rgba(${r},${g},${b},${a})`;
+  if (_cssCache.size < 256) _cssCache.set(key, v);
+  return v;
 }
 
 export function roundedPath(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, r: number): void {
