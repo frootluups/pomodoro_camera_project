@@ -5,10 +5,14 @@
   "description": "Focus-aware Pomodoro timer — browser-native TypeScript 7 port of the OpenCV Python app",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc --noEmit && vite build",
-    "build:embed": "tsc --noEmit && vite build --config vite.embed.config.ts",
-    "preview": "vite preview",
+    "dev": "vite --config apps/web/vite.config.ts",
+    "dev:embed": "vite --config apps/embed/vite.config.ts",
+    "build": "tsc --noEmit && vite build --config apps/web/vite.config.ts",
+    "build:embed-app": "tsc --noEmit && vite build --config apps/embed/vite.config.ts",
+    "build:embed": "tsc --noEmit && vite build --config apps/embed/vite.embed.config.ts",
+    "build:all": "npm run build && npm run build:embed-app && npm run build:embed",
+    "preview": "vite preview --config apps/web/vite.config.ts",
+    "preview:embed": "vite preview --config apps/embed/vite.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

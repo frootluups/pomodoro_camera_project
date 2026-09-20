@@ -62,8 +62,9 @@ MIN_RENDER_W: Final = 320
 MIN_RENDER_H: Final = 240
 DEFAULT_WINDOW_W: Final = 960
 DEFAULT_WINDOW_H: Final = 600
-LAYOUT_FILE: Final = Path("layout.json")
-SETTINGS_FILE: Final = Path("settings.json")
+_APP_DIR: Final = Path(__file__).parent
+LAYOUT_FILE: Final = _APP_DIR / "layout.json"
+SETTINGS_FILE: Final = _APP_DIR / "settings.json"
 CASCADE_FILE: Final = "haarcascade_frontalface_default.xml"
 EYE_CASCADE_FILE: Final = "haarcascade_eye.xml"
 
@@ -457,8 +458,6 @@ _FONT_PATHS: tuple[str | None, str | None] = _resolve_font_paths() if _PIL_AVAIL
 _FONT_CACHE: dict[tuple[int, bool], Any] = {}
 _TEXT_SIZE_CACHE: dict[tuple[str, int, bool], tuple[int, int]] = {}
 _FIT_TEXT_CACHE: dict[tuple[str, int, int, int, bool], tuple[int, tuple[int, int]]] = {}
-_TEXT_MASK_CACHE: dict[tuple[str, int, bool, int], tuple[np.ndarray, int, int]] = {}
-_TEXT_MASK_CACHE_MAX: Final = 256
 _DRAW_TEXT_PATCH_CACHE: dict[tuple[str, int, bool, tuple[int, int, int], int, tuple[int, int, int]], tuple[np.ndarray, np.ndarray]] = {}
 _DRAW_TEXT_PATCH_CACHE_MAX: Final = 128
 # Reusable dummy for text measurement — avoids per-call Image allocation
@@ -468,8 +467,7 @@ _DUMMY_DRAW: Any = ImageDraw.Draw(_DUMMY_IMG) if _PIL_AVAILABLE and _DUMMY_IMG i
 _H_GRAD_CACHE: dict[tuple[int, tuple[int, int, int], tuple[int, int, int]], np.ndarray] = {}
 _V_GRAD_CACHE: dict[tuple[int, tuple[int, int, int], tuple[int, int, int]], np.ndarray] = {}
 _GRAD_CACHE_MAX: Final = 64
-_H_GRAD_SHRINK_CACHE: dict[tuple[int, int], np.ndarray] = {}
-_XP_BTN_CACHE: dict[tuple[int, bool, bool], tuple[np.ndarray, np.ndarray]] = {}
+_XP_BTN_CACHE: dict[tuple[int, tuple[int, int, int], tuple[int, int, int]], tuple[np.ndarray, np.ndarray]] = {}
 _XP_PROG_CACHE: dict[int, np.ndarray] = {}
 
 
@@ -934,7 +932,7 @@ def _h_gradient(
     cx1, cy1, cx2, cy2 = max(0, x1), max(0, y1), min(iw, x2), min(ih, y2)
     if cx2 <= cx1 or cy2 <= cy1:
         return
-    # Cached gradient cols
+    # Cached gradient cols — radius path removed (never used with radius>0); single fast blit
     key = (w, c1, c2)
     cols = _H_GRAD_CACHE.get(key)
     if cols is None:
@@ -944,26 +942,6 @@ def _h_gradient(
         cols = (c1a + np.outer(t, c2a - c1a)).clip(0, 255).astype(np.uint8)
         if len(_H_GRAD_CACHE) < _GRAD_CACHE_MAX:
             _H_GRAD_CACHE[key] = cols
-    if radius > 0:
-        r = min(radius, w // 2, h // 2)
-        shrink_key = (w, r)
-        shrink = _H_GRAD_SHRINK_CACHE.get(shrink_key)
-        if shrink is None:
-            centers = np.arange(w, dtype=np.float32)
-            edge_dist = np.minimum(centers, w - 1 - centers)
-            shrink = (r - np.sqrt(np.maximum(0, r * r - np.maximum(0, r - edge_dist) ** 2))).astype(np.int32)
-            shrink = np.where(edge_dist < r, shrink, 0)
-            if len(_H_GRAD_SHRINK_CACHE) < 32:
-                _H_GRAD_SHRINK_CACHE[shrink_key] = shrink
-        for i in range(w):
-            gx = x1 + i
-            if gx < cx1 or gx >= cx2:
-                continue
-            sy, ey = y1 + int(shrink[i]), y2 - int(shrink[i])
-            sy, ey = max(sy, cy1), min(ey, cy2)
-            if sy < ey:
-                cv2.line(img, (gx, sy), (gx, ey), tuple(cols[i].tolist()), 1, cv2.LINE_AA)
-        return
     x_off = cx1 - x1
     cols_clip = cols[x_off : x_off + (cx2 - cx1)]
     img[cy1:cy2, cx1:cx2] = cols_clip[None, :, :]
@@ -1030,6 +1008,7 @@ def _xp_button(
     hi, sh, dk = (255, 255, 255), (105, 105, 105), (60, 60, 60)
 
     # fast gradient fill — cached vertical gradients
+    half_h = bh // 2
     cache_key = (bh, c_top, c_bot)
     cached = _XP_BTN_CACHE.get(cache_key)
     if cached is not None:
@@ -1037,7 +1016,6 @@ def _xp_button(
     else:
         c1 = np.array(c_top, dtype=np.float32)
         c2 = np.array(c_bot, dtype=np.float32)
-        half_h = bh // 2
         t1 = np.linspace(0, 1, half_h, dtype=np.float32) if half_h > 0 else np.array([0.0], dtype=np.float32)
         t2 = np.linspace(0, 1, bh - half_h, dtype=np.float32) if bh - half_h > 0 else np.array([0.0], dtype=np.float32)
         top_cols = (c1 + np.outer(t1, c2 - c1)).clip(0, 255).astype(np.uint8)
@@ -1526,7 +1504,11 @@ class PomodoroTimer:
 
     def _play_alert_sound(self) -> None:
         now = time.time()
-        if not self.alerts_enabled or now - self._last_alert_ts < 8.0:
+        # throttle: at most every 4s when slacking (was 8s — too quiet)
+        if not self.alerts_enabled or now - self._last_alert_ts < 4.0:
+            return
+        # only when actually slacking and running
+        if not (self.is_running and self.focus_state == FocusState.SLACKING):
             return
         self._last_alert_ts = now
 
@@ -1535,22 +1517,33 @@ class PomodoroTimer:
                 if platform.system() == "Windows":
                     import winsound
 
+                    # urgent triple beep — more noticeable
                     winsound.Beep(880, 180)
                     winsound.Beep(660, 220)
-                    # Extra beep for urgency when slacking
                     winsound.Beep(880, 120)
+                    winsound.Beep(1100, 150)
                 else:
-                    # Non-Windows: try system bell + log
                     print("\a", end="", flush=True)
-                    # Also try paplay/beep if available
                     try:
                         import subprocess
 
                         subprocess.Popen(["paplay", "/usr/share/sounds/freedesktop/stereo/alarm-clock-elapsed.oga"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     except Exception:
                         pass
+                    # fallback: try aplay/beep
+                    try:
+                        import subprocess
+
+                        subprocess.Popen(["beep", "-f", "880", "-l", "180"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    except Exception:
+                        pass
             except Exception as exc:
                 log.debug("Alert sound failed: %s", exc)
+                # fallback bell
+                try:
+                    print("\a", end="", flush=True)
+                except Exception:
+                    pass
 
         try:
             import threading
@@ -1638,8 +1631,33 @@ class PomodoroTimer:
                 corner_r = int(min(bw, bh) * 0.14)
                 styled_rect(frame, bx1, by1, bx2, by2, border=color, thickness=thick, radius=corner_r)
 
+                # eye indicator dot on top-right of face box
+                if bw > 40 and bh > 40:
+                    try:
+                        eye_flags = getattr(self, "_last_eye_verified", [])
+                        # map person index to eye flag (order matches raw_dets before NMS, approximate)
+                        eye_ok = True
+                        if eye_flags and len(eye_flags) == len(tracks):
+                            idx = tracks.index(person)
+                            eye_ok = bool(eye_flags[idx]) if idx < len(eye_flags) else True
+                        dot_r = max(4, min(7, int(bh * 0.06)))
+                        dot_x, dot_y = bx2 - dot_r - 4, by1 + dot_r + 4
+                        dot_col = (80, 200, 80) if eye_ok else (200, 80, 80)
+                        cv2.circle(frame, (dot_x, dot_y), dot_r, dot_col, -1, cv2.LINE_AA)
+                        cv2.circle(frame, (dot_x, dot_y), dot_r, (255, 255, 255), 1, cv2.LINE_AA)
+                    except Exception:
+                        pass
                 # tiny ID pill — only show pid number, subtle
-                pid_text = f"#{person.pid}"
+                eye_suffix = ""
+                try:
+                    eye_flags2 = getattr(self, "_last_eye_verified", [])
+                    if eye_flags2 and len(eye_flags2) == len(tracks):
+                        idx2 = tracks.index(person)
+                        eye_ok2 = bool(eye_flags2[idx2]) if idx2 < len(eye_flags2) else True
+                        eye_suffix = " 👁" if eye_ok2 else " ○"
+                except Exception:
+                    pass
+                pid_text = f"#{person.pid}{eye_suffix}"
                 # hide verbose G mapping in minimalist mode — keep clean
                 pid_px = max(9, int(bh * 0.095))
                 tw, th = text_size(pid_text, pid_px, True)
@@ -2291,11 +2309,12 @@ class PomodoroTimer:
                         faces = []
                 inv = 1.0 / det_scale if det_scale != 1.0 else 1.0
                 raw_dets = [(int(x * inv), int(y * inv), int(w * inv), int(h * inv)) for (x, y, w, h) in faces]
-                # geometric pre-filter: discard absurd sizes / aspect ratios before NMS
+                # geometric pre-filter + eye-verified detection: discard absurd sizes / aspect ratios before NMS
                 if raw_dets and frame is not None:
                     fh, fw = frame.shape[:2]
                     frame_area = float(fw * fh)
                     filt: list[tuple[int, int, int, int]] = []
+                    eye_verified_flags: list[bool] = []
                     for (x, y, wb, hb) in raw_dets:
                         area_frac = (wb * hb) / max(1.0, frame_area)
                         if not (TRACK_MIN_SIZE_FRAC <= area_frac <= TRACK_MAX_SIZE_FRAC):
@@ -2310,28 +2329,57 @@ class PomodoroTimer:
                             continue
                         if y < fh * 0.14 and area_frac > 0.095:
                             continue
-                        # very bright patch (ceiling lamp) — Haar loves bright squares
+                        # eye verification — run on upper half of face ROI for all detections
+                        eye_verified = False
+                        is_bright = False
                         try:
-                            if frame is not None:
-                                cx, cy = int(x + wb * 0.5), int(y + hb * 0.5)
-                                if 0 <= cx < fw and 0 <= cy < fh:
-                                    patch = frame[max(0, cy - 10):cy + 10, max(0, cx - 10):cx + 10]
-                                    if patch.size and float(np.mean(patch)) > 202:
-                                        # require strong eye evidence for bright regions
-                                        if self.eye_cascade is not None and not self.eye_cascade.empty():
-                                            xs = int(x * det_scale); ys = int(y * det_scale)
-                                            ws = int(wb * det_scale); hs = int(hb * det_scale)
-                                            roi = gray_small[max(0, ys):ys + hs // 2, max(0, xs):xs + ws]
-                                            if roi.size:
-                                                eyes = self.eye_cascade.detectMultiScale(roi, 1.1, 3, minSize=(14, 14))
-                                                if len(eyes) == 0:
-                                                    continue
-                                        else:
-                                            continue
+                            cx, cy = int(x + wb * 0.5), int(y + hb * 0.5)
+                            if 0 <= cx < fw and 0 <= cy < fh:
+                                patch = frame[max(0, cy - 10):cy + 10, max(0, cx - 10):cx + 10]
+                                if patch.size and float(np.mean(patch)) > 202:
+                                    is_bright = True
                         except Exception:
                             pass
+                        # run eye cascade if available
+                        if self.eye_cascade is not None and not self.eye_cascade.empty():
+                            try:
+                                xs = int(x * det_scale); ys = int(y * det_scale)
+                                ws = int(wb * det_scale); hs = int(hb * det_scale)
+                                # upper 55% of face — eyes are in top half
+                                roi_h = max(8, hs // 2)
+                                roi = gray_small[max(0, ys):ys + roi_h, max(0, xs):xs + ws]
+                                if roi.size and roi.shape[0] >= 14 and roi.shape[1] >= 14:
+                                    # equalize ROI for better eye detection
+                                    try:
+                                        roi_eq = cv2.equalizeHist(roi)
+                                    except Exception:
+                                        roi_eq = roi
+                                    eyes = self.eye_cascade.detectMultiScale(roi_eq, 1.1, 3, minSize=(14, 14))
+                                    if len(eyes) >= 1:
+                                        eye_verified = True
+                                    # require at least 1 eye for bright/suspicious regions, else discard
+                                    if is_bright and not eye_verified:
+                                        continue
+                                    # for large faces near top, also require eyes
+                                    if not eye_verified and area_frac > 0.08 and y < fh * 0.18:
+                                        continue
+                                else:
+                                    # ROI too small — can't verify, keep but mark unverified
+                                    eye_verified = False
+                                    if is_bright:
+                                        continue
+                            except Exception:
+                                eye_verified = False
+                        else:
+                            # no eye cascade — fallback to bright check only
+                            if is_bright:
+                                continue
+                            eye_verified = True  # assume verified if no cascade
                         filt.append((x, y, wb, hb))
+                        eye_verified_flags.append(eye_verified)
                     raw_dets = filt
+                    # store eye verification for scoring boost
+                    self._last_eye_verified = eye_verified_flags
                 # aggressive NMS: IoU or center-proximity → same face (kills duplicate boxes for 1 person)
                 if len(raw_dets) > 1:
                     raw_dets = sorted(raw_dets, key=lambda d: d[2] * d[3], reverse=True)
@@ -2426,19 +2474,55 @@ class PomodoroTimer:
         motion = float(np.mean(cv2.absdiff(self.prev_gray, gray_small))) / 255.0
         self.prev_gray = gray_small
 
-        # Focus scoring: face presence is primary, motion is secondary
-        # Previous weights (72/28) were too motion-sensitive — small movements tanked score
-        face_score = 1.0 if self.last_faces else 0.0
+        # Focus scoring: face + eye verification is primary, motion is secondary
+        # Eye-verified faces get full confidence; unverified get reduced weight
+        eye_verified = getattr(self, "_last_eye_verified", [])
+        if self.last_faces:
+            if eye_verified and len(eye_verified) == len(self.last_faces):
+                verified_count = sum(1 for v in eye_verified if v)
+                # eye confidence: 1.0 if all verified, 0.55 if none verified, linear in between
+                eye_conf = 0.55 + 0.45 * (verified_count / max(1, len(eye_verified)))
+            elif eye_verified:
+                # mismatch — fallback to 0.85 if we have any eye data
+                eye_conf = 0.85
+            else:
+                eye_conf = 0.85
+            face_score = eye_conf
+            self._eye_verified_count = sum(1 for v in eye_verified if v) if eye_verified else len(self.last_faces)
+        else:
+            face_score = 0.0
+            self._eye_verified_count = 0
         # Reduced motion penalty — face present should stay concentrated unless large motion
-        motion_penalty = min(1.0, motion * (1.0 if face_score else 2.0))
+        motion_penalty = min(1.0, motion * (1.0 if face_score > 0.5 else 2.0))
         score = (face_score * 80.0) + ((1.0 - motion_penalty) * 20.0)
         if not self.last_faces:
             score *= 0.45  # No face = stronger slacking signal
+        elif face_score < 0.7:
+            score *= 0.92  # Slight penalty for unverified faces
         # clamp and smooth with one-pole EMA to avoid jitter
         score = max(0.0, min(100.0, score))
         prev = getattr(self, "_smooth_score", score)
         score = prev * 0.30 + score * 0.70  # Slightly more responsive
         self._smooth_score = score
+        # live stats tracking — update history for sparkline
+        try:
+            now_ts = time.time()
+            if not hasattr(self, "_live_focus_history"):
+                self._live_focus_history: list[tuple[float, float]] = []
+            self._live_focus_history.append((now_ts, score))
+            # keep last 120 samples (~2 min at 1Hz effective, but we sample every frame)
+            cutoff = now_ts - 120
+            self._live_focus_history = [(t, s) for t, s in self._live_focus_history if t >= cutoff]
+            # also track session stats
+            if not hasattr(self, "_live_stats"):
+                self._live_stats = {"frames": 0, "focused_frames": 0, "slacking_frames": 0}
+            self._live_stats["frames"] += 1
+            if score >= FOCUS_CONCENTRATED_THRESHOLD:
+                self._live_stats["focused_frames"] += 1
+            elif score <= FOCUS_SLACKING_THRESHOLD:
+                self._live_stats["slacking_frames"] += 1
+        except Exception:
+            pass
         return score
 
     def classify_focus_state(self, score: float, frame: np.ndarray | None = None) -> str:
@@ -2467,6 +2551,9 @@ class PomodoroTimer:
             self._draw_slacking_alert(frame, theme, rounded, ui_scale)
         else:
             self._alert_active = False
+
+        if self.is_running:
+            self._draw_live_stats_hud(frame, theme, rounded, ui_scale, fw, fh)
 
         self._draw_progress_bar(frame, progress, phase_color, theme, rounded, fw, fh)
         self._draw_timer_popup(frame, timer_text, phase_text, phase_color, theme, rounded, fw, fh)
@@ -2577,24 +2664,113 @@ class PomodoroTimer:
         if fx2 - fx1 <= 4 or fy2 - fy1 <= 4:
             return
         n = getattr(self, "person_count", len(getattr(self, "last_faces", [])))
+        eye_n = getattr(self, "_eye_verified_count", n)
+        score = getattr(self, "focus_score", 0)
         if not self.is_running:
             focus_text = f"Ready" + (f" · {n}" if n else "")
         else:
             base = self.focus_state.title()
-            if n > 1:
-                focus_text = f"{base} · {n}"
+            # show eye verification: "Concentrated · 1 👁" or "Concentrated · 2 (1👁)"
+            if n == 0:
+                focus_text = f"{base}"
             elif n == 1:
-                focus_text = f"{base}"
+                focus_text = f"{base} {int(score)}%" + (f" · 👁" if eye_n else " · ○")
             else:
-                focus_text = f"{base}"
+                focus_text = f"{base} {int(score)}% · {n} ({eye_n}👁)"
         # minimalist pill behind text
         px, (tw, th) = fit_text(focus_text, fx2 - fx1 - 12, fy2 - fy1 - 6, int(0.52 * (fy2 - fy1) * ui_scale))
         pill_w, pill_h = tw + 14, th + 8
         px1 = fx1 + 4
         py1 = fy1 + (fy2 - fy1 - pill_h) // 2
+        # color pill by focus state
+        if self.is_running and self.focus_state == FocusState.CONCENTRATED:
+            pill_border = theme["on_color"]
+        elif self.is_running and self.focus_state == FocusState.SLACKING:
+            pill_border = (60, 60, 255)
+        else:
+            pill_border = (60, 60, 68)
         _alpha_blend_roi(frame, px1, py1, px1 + pill_w, py1 + pill_h, (28, 28, 32), 0.62, pill_h // 2)
-        styled_rect(frame, px1, py1, px1 + pill_w, py1 + pill_h, border=(60, 60, 68), thickness=1, radius=pill_h // 2)
+        styled_rect(frame, px1, py1, px1 + pill_w, py1 + pill_h, border=pill_border, thickness=1, radius=pill_h // 2)
         draw_text(frame, focus_text, px1 + pill_w // 2, py1 + pill_h // 2, px, theme["text"], anchor="mm")
+        # live sparkline below pill when running and enough history
+        if self.is_running and hasattr(self, "_live_focus_history") and len(self._live_focus_history) >= 4:
+            try:
+                hist: list[tuple[float, float]] = self._live_focus_history  # type: ignore[assignment]
+                # sparkline rect just below pill
+                sp_x1, sp_y1 = px1, py1 + pill_h + 4
+                sp_w, sp_h = min(pill_w, 140), 22
+                sp_x2, sp_y2 = sp_x1 + sp_w, sp_y1 + sp_h
+                if sp_y2 < fy2:
+                    _alpha_blend_roi(frame, sp_x1, sp_y1, sp_x2, sp_y2, (22, 22, 26), 0.55, 4)
+                    styled_rect(frame, sp_x1, sp_y1, sp_x2, sp_y2, border=(50, 50, 58), thickness=1, radius=4)
+                    # draw sparkline
+                    scores = [s for _, s in hist[-30:]]
+                    if len(scores) >= 2:
+                        n_pts = len(scores)
+                        for i in range(n_pts - 1):
+                            x_a = int(sp_x1 + 2 + (i / max(1, n_pts - 1)) * (sp_w - 4))
+                            x_b = int(sp_x1 + 2 + ((i + 1) / max(1, n_pts - 1)) * (sp_w - 4))
+                            y_a = int(sp_y2 - 2 - (scores[i] / 100.0) * (sp_h - 4))
+                            y_b = int(sp_y2 - 2 - (scores[i + 1] / 100.0) * (sp_h - 4))
+                            # color by score
+                            if scores[i] >= FOCUS_CONCENTRATED_THRESHOLD:
+                                col = theme["on_color"]
+                            elif scores[i] <= FOCUS_SLACKING_THRESHOLD:
+                                col = (60, 60, 255)
+                            else:
+                                col = theme["accent"]
+                            cv2.line(frame, (x_a, y_a), (x_b, y_b), col, 1, cv2.LINE_AA)
+                    # threshold lines
+                    y70 = int(sp_y2 - 2 - 0.70 * (sp_h - 4))
+                    y35 = int(sp_y2 - 2 - 0.35 * (sp_h - 4))
+                    cv2.line(frame, (sp_x1 + 2, y70), (sp_x2 - 2, y70), (80, 180, 80), 1, cv2.LINE_AA)
+                    cv2.line(frame, (sp_x1 + 2, y35), (sp_x2 - 2, y35), (180, 80, 80), 1, cv2.LINE_AA)
+            except Exception:
+                pass
+
+    def _draw_live_stats_hud(self, frame: np.ndarray, theme: dict[str, Any], rounded: bool, ui_scale: float, fw: int, fh: int) -> None:
+        try:
+            stats = getattr(self, "_live_stats", None)
+            if not stats or stats.get("frames", 0) < 1:
+                return
+            total = max(1, stats["frames"])
+            focused_pct = int(round(stats["focused_frames"] / total * 100))
+            slacking_pct = int(round(stats["slacking_frames"] / total * 100))
+            neutral_pct = max(0, 100 - focused_pct - slacking_pct)
+            score = int(round(getattr(self, "focus_score", 0)))
+            n = getattr(self, "person_count", 0)
+            eye_n = getattr(self, "_eye_verified_count", n)
+            hud_w, hud_h = 148, 62
+            hx1, hy1 = fw - hud_w - 10, 10
+            hx2, hy2 = hx1 + hud_w, hy1 + hud_h
+            if hx1 < 0 or hy2 > fh:
+                return
+            r = 8 if rounded else 0
+            _alpha_blend_roi(frame, hx1, hy1, hx2, hy2, (22, 22, 26), 0.72, r)
+            styled_rect(frame, hx1, hy1, hx2, hy2, border=(50, 50, 58), thickness=1, radius=r)
+            draw_text(frame, "LIVE STATS", hx1 + 8, hy1 + 6, 9, theme["subtext"], bold=True, anchor="la")
+            eye_label = f" 👁{eye_n}/{n}" if n else ""
+            draw_text(frame, f"{score}%{eye_label}", hx1 + 8, hy1 + 20, 12, theme["text"], bold=True, anchor="la")
+            # stacked bar
+            bar_x, bar_y, bar_w, bar_h = hx1 + 8, hy1 + 38, hud_w - 16, 8
+            br = bar_h // 2
+            styled_rect(frame, bar_x, bar_y, bar_x + bar_w, bar_y + bar_h, fill=(38, 38, 42), radius=br)
+            cur_x = bar_x
+            if focused_pct > 0:
+                w = max(2, int(round(focused_pct / 100 * bar_w)))
+                styled_rect(frame, cur_x, bar_y, min(cur_x + w, bar_x + bar_w), bar_y + bar_h, fill=theme["on_color"], radius=br)
+                cur_x += w
+            if neutral_pct > 0:
+                w = max(2, int(round(neutral_pct / 100 * bar_w)))
+                styled_rect(frame, cur_x, bar_y, min(cur_x + w, bar_x + bar_w), bar_y + bar_h, fill=(90, 90, 100), radius=br)
+                cur_x += w
+            if slacking_pct > 0:
+                w = bar_x + bar_w - cur_x
+                if w > 0:
+                    styled_rect(frame, cur_x, bar_y, cur_x + w, bar_y + bar_h, fill=(60, 60, 200), radius=br)
+            draw_text(frame, f"{focused_pct}% ●  {neutral_pct}% ●  {slacking_pct}%", bar_x, bar_y + bar_h + 4, 7, theme["subtext"], anchor="la")
+        except Exception:
+            pass
 
     def _draw_status_display(self, frame: np.ndarray, theme: dict[str, Any], fw: int, fh: int, ui_scale: float) -> None:
         if not self.layout_manager.config.elements.get("status_display", UIElementConfig()).enabled:

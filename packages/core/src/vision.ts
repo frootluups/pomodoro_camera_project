@@ -83,9 +83,15 @@ export class VisionEngine {
   private detectCtx: CanvasRenderingContext2D | null = null;
   private embedCanvas: HTMLCanvasElement | null = null;
   private embedCtx: CanvasRenderingContext2D | null = null;
+  private eyeCanvas: HTMLCanvasElement | null = null;
+  private eyeCtx: CanvasRenderingContext2D | null = null;
   // expose for UI
   lastFaces: BBox[] = [];
   motion = 0;
+  eyeVerified: boolean[] = [];
+  eyeVerifiedCount = 0;
+  liveFocusHistory: { t: number; score: number }[] = [];
+  liveStats = { frames: 0, focused: 0, slacking: 0 };
 
   private getMotionCanvas(): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
     if (!this.motionCanvas) {
@@ -119,6 +125,71 @@ export class VisionEngine {
       this.embedCtx = this.embedCanvas.getContext("2d");
     }
     return this.embedCtx && this.embedCanvas ? { canvas: this.embedCanvas, ctx: this.embedCtx } : null;
+  }
+
+  private getEyeCanvas(): { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D } | null {
+    if (!this.eyeCanvas) {
+      this.eyeCanvas = document.createElement("canvas");
+      this.eyeCanvas.width = 64; this.eyeCanvas.height = 32;
+      this.eyeCtx = this.eyeCanvas.getContext("2d", { willReadFrequently: true });
+    }
+    return this.eyeCtx && this.eyeCanvas ? { canvas: this.eyeCanvas, ctx: this.eyeCtx } : null;
+  }
+
+  /** Heuristic eye verification: upper half of face should have dark eye-like regions */
+  private verifyEyes(video: HTMLVideoElement, bbox: BBox, frameW: number, frameH: number): boolean {
+    const [x, y, w, h] = bbox;
+    if (w < 24 || h < 24) return false;
+    const ec = this.getEyeCanvas();
+    if (!ec) return false;
+    // upper 55% of face
+    const eyeH = h * 0.55;
+    const sx = Math.max(0, x), sy = Math.max(0, y);
+    const sw = Math.min(frameW - sx, w), sh = Math.min(frameH - sy, eyeH);
+    if (sw < 12 || sh < 8) return false;
+    // draw upper face region to 64x32 eye canvas
+    ec.ctx.clearRect(0, 0, 64, 32);
+    try {
+      ec.ctx.drawImage(video, sx, sy, sw, sh, 0, 0, 64, 32);
+    } catch { return false; }
+    const data = ec.ctx.getImageData(0, 0, 64, 32).data;
+    // heuristic: look for dark horizontal bands (eyes) in upper face
+    // split into left/right eye regions, check for dark pixels
+    let leftDark = 0, rightDark = 0, leftTotal = 0, rightTotal = 0;
+    for (let py = 6; py < 26; py++) {
+      for (let px = 4; px < 28; px++) {
+        const idx = (py * 64 + px) * 4;
+        const luma = (data[idx]! * 77 + data[idx + 1]! * 150 + data[idx + 2]! * 29) >> 8;
+        leftTotal++;
+        if (luma < 70) leftDark++;
+      }
+      for (let px = 36; px < 60; px++) {
+        const idx = (py * 64 + px) * 4;
+        const luma = (data[idx]! * 77 + data[idx + 1]! * 150 + data[idx + 2]! * 29) >> 8;
+        rightTotal++;
+        if (luma < 70) rightDark++;
+      }
+    }
+    const leftRatio = leftDark / Math.max(1, leftTotal);
+    const rightRatio = rightDark / Math.max(1, rightTotal);
+    // at least one eye region should have some dark pixels (eyes/pupils)
+    // but not too many (would be shadow/hair)
+    const hasLeftEye = leftRatio > 0.04 && leftRatio < 0.45;
+    const hasRightEye = rightRatio > 0.04 && rightRatio < 0.45;
+    // also check overall contrast in eye band — eyes create local dark spots
+    let minLuma = 255, maxLuma = 0;
+    for (let py = 8; py < 24; py++) {
+      for (let px = 8; px < 56; px++) {
+        const idx = (py * 64 + px) * 4;
+        const luma = (data[idx]! * 77 + data[idx + 1]! * 150 + data[idx + 2]! * 29) >> 8;
+        if (luma < minLuma) minLuma = luma;
+        if (luma > maxLuma) maxLuma = luma;
+      }
+    }
+    const contrast = maxLuma - minLuma;
+    // need reasonable contrast (face has light skin + dark eyes)
+    if (contrast < 35) return false;
+    return hasLeftEye || hasRightEye;
   }
 
   async detectFaces(video: HTMLVideoElement, width: number, height: number): Promise<BBox[]> {
@@ -168,7 +239,34 @@ export class VisionEngine {
     if (shouldDetect) {
       let raw = await this.detectFaces(video, w, h);
       raw = filterGeometric(raw, w, h);
+      // eye verification — filter suspicious detections, track verification flags
+      const verified: boolean[] = [];
+      const eyeFiltered: BBox[] = [];
+      for (const det of raw) {
+        const [dx, dy, dw, dh] = det;
+        const areaFrac = (dw * dh) / Math.max(1, w * h);
+        const isBrightSuspect = dy < h * 0.14 && areaFrac > 0.055;
+        const isLargeTop = dy < h * 0.18 && areaFrac > 0.08;
+        const eyeOk = this.verifyEyes(video, det, w, h);
+        // bright/large-top detections require eye evidence
+        if ((isBrightSuspect || isLargeTop) && !eyeOk) continue;
+        eyeFiltered.push(det);
+        verified.push(eyeOk);
+      }
+      raw = eyeFiltered;
+      this.eyeVerified = verified;
       raw = nms(raw);
+      // re-align verified flags after NMS (keep flags for kept boxes)
+      // NMS keeps largest first, so map by bbox identity
+      if (verified.length !== raw.length) {
+        // NMS may have dropped some — rebuild verified for kept
+        const keptVerified: boolean[] = [];
+        for (const k of raw) {
+          const idx = eyeFiltered.findIndex((d) => d[0] === k[0] && d[1] === k[1] && d[2] === k[2] && d[3] === k[3]);
+          keptVerified.push(idx >= 0 ? verified[idx]! : true);
+        }
+        this.eyeVerified = keptVerified;
+      }
       this.tracker.update(raw, this.frameIdx);
       const active = this.tracker.active;
       // gallery bookkeeping (HSV hist)
@@ -211,15 +309,36 @@ export class VisionEngine {
     this.motion = motion;
     this.prevSmall = cur;
 
-    // Face presence is primary signal — motion is secondary
-    const faceScore = this.lastFaces.length ? 1 : 0;
-    const motionPenalty = Math.min(1, motion * (faceScore ? 1.0 : 2.0));
+    // Face presence + eye verification is primary signal — motion is secondary
+    let faceScore: number;
+    if (!this.lastFaces.length) {
+      faceScore = 0;
+      this.eyeVerifiedCount = 0;
+    } else if (this.eyeVerified.length === this.lastFaces.length) {
+      const verifiedCount = this.eyeVerified.filter(Boolean).length;
+      this.eyeVerifiedCount = verifiedCount;
+      const eyeConf = 0.55 + 0.45 * (verifiedCount / Math.max(1, this.eyeVerified.length));
+      faceScore = eyeConf;
+    } else {
+      faceScore = this.lastFaces.length ? 0.85 : 0;
+      this.eyeVerifiedCount = this.lastFaces.length;
+    }
+    const motionPenalty = Math.min(1, motion * (faceScore > 0.5 ? 1.0 : 2.0));
     let score = faceScore * 80 + (1 - motionPenalty) * 20;
     if (!faceScore) score *= 0.45;
+    else if (faceScore < 0.7) score *= 0.92;
     score = Math.max(0, Math.min(100, score));
     const prev = this.smoothScore ?? score;
     score = prev * 0.30 + score * 0.70;
     this.smoothScore = score;
+    // live stats tracking
+    const now = Date.now();
+    this.liveFocusHistory.push({ t: now, score });
+    const cutoff = now - 120_000;
+    this.liveFocusHistory = this.liveFocusHistory.filter((s) => s.t >= cutoff);
+    this.liveStats.frames++;
+    if (score >= FOCUS_CONCENTRATED_THRESHOLD) this.liveStats.focused++;
+    else if (score <= FOCUS_SLACKING_THRESHOLD) this.liveStats.slacking++;
     return score;
   }
 
@@ -232,5 +351,6 @@ export class VisionEngine {
 
   reset(): void {
     this.tracker.clear(); this.lastFaces = []; this.prevSmall = null; this.smoothScore = null; this.frameIdx = 0;
+    this.eyeVerified = []; this.eyeVerifiedCount = 0; this.liveFocusHistory = []; this.liveStats = { frames: 0, focused: 0, slacking: 0 };
   }
 }

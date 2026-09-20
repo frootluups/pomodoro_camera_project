@@ -3,6 +3,7 @@ import { BREAK_MIN_DEFAULT, LONG_BREAK_MIN_DEFAULT, POMODOROS_BEFORE_LONG_BREAK,
 import { CornerStyle, DisplayMode, FocusState, Phase, ThemeName } from "./types.ts";
 import type { AppSettings, ThemeName as TName } from "./types.ts";
 import { THEMES } from "./theme.ts";
+import { getHistory } from "./history.ts";
 
 export class PomodoroTimer {
   sessionMinutes: number;
@@ -151,14 +152,13 @@ export class PomodoroTimer {
     const durationSec = Math.round((endedAt - this.phaseStartMs) / 1000);
     if (durationSec < 5) { this.phaseStartMs = null; return; }
     try {
-      const { getHistory } = require("./history.ts") as { getHistory: () => { add: (r: unknown) => void } };
-      getHistory().add({
+      const rec: Parameters<ReturnType<typeof getHistory>["add"]>[0] = {
         phase: this.currentPhase as "pomodoro" | "short_break" | "long_break",
         startedAt: this.phaseStartMs, endedAt, durationSec, completed,
-        focusAvg: this.focusCount ? Math.round(this.focusSum / this.focusCount) : undefined,
-      });
+        ...(this.focusCount ? { focusAvg: Math.round(this.focusSum / this.focusCount) } : {}),
+      };
+      getHistory().add(rec);
     } catch {
-      // history is optional — lazy import may fail in some bundlers; fallback to direct
       try {
         const key = "pomodoro.history.v1";
         const raw = localStorage.getItem(key);
@@ -243,7 +243,7 @@ export class PomodoroTimer {
   shouldAlert(): boolean {
     if (!this.alertsEnabled || !this.isRunning || this.focusState !== FocusState.Slacking) return false;
     const now = Date.now() / 1000;
-    if (now - this.lastAlertTs < 8) return false;
+    if (now - this.lastAlertTs < 4) return false;
     this.lastAlertTs = now;
     return true;
   }
@@ -259,11 +259,11 @@ export class PomodoroTimer {
         const o = ctx.createOscillator(), g = ctx.createGain();
         o.type = "sine";
         o.frequency.value = freq; o.connect(g); g.connect(ctx.destination);
-        g.gain.setValueAtTime(0.18 * vol, ctx.currentTime + delay);
+        g.gain.setValueAtTime(0.22 * vol, ctx.currentTime + delay);
         g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + dur);
         o.start(ctx.currentTime + delay); o.stop(ctx.currentTime + delay + dur);
       };
-      mk(880, 0.18, 0); mk(660, 0.22, 0.2); mk(880, 0.12, 0.42);
+      mk(880, 0.18, 0); mk(660, 0.22, 0.2); mk(880, 0.12, 0.42); mk(1100, 0.15, 0.56);
     } catch {}
   }
 

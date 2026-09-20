@@ -1,22 +1,27 @@
 import { defineConfig } from "vite";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export default defineConfig({
+  root: __dirname,
+  publicDir: resolve(__dirname, "public"),
   server: {
     port: 5173,
     open: false,
   },
   build: {
     target: "es2023",
-    outDir: "dist",
+    outDir: resolve(__dirname, "dist"),
+    emptyOutDir: true,
     sourcemap: true,
     minify: "esbuild",
     cssMinify: true,
     chunkSizeWarningLimit: 800,
     rollupOptions: {
       input: {
-        main: "index.html",
-        embed: "embed.html",
-        demo: "embed-demo.html",
+        main: resolve(__dirname, "index.html"),
       },
       output: {
         manualChunks: {
@@ -29,7 +34,7 @@ export default defineConfig({
   worker: { format: "es" },
   optimizeDeps: {
     include: ["@tensorflow/tfjs", "@tensorflow-models/blazeface"],
-    exclude: ["src/workers/motion.worker.ts"],
+    exclude: ["packages/core/src/workers/motion.worker.ts"],
   },
   esbuild: {
     drop: process.env.NODE_ENV === "production" ? ["console", "debugger"] : [],

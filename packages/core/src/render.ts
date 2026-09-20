@@ -77,27 +77,6 @@ export function vGradient(
   ctx.fillRect(x1, y1, x2 - x1, y2 - y1);
 }
 
-export function drawXpButton(
-  ctx: CanvasRenderingContext2D,
-  x1: number, y1: number, x2: number, y2: number,
-  label: string, opts: { accent?: boolean; active?: boolean; textColor?: RGB; px?: number; bold?: boolean } = {},
-): void {
-  const w = x2 - x1, h = y2 - y1;
-  if (w < 4 || h < 4) return;
-  const r = Math.min(6, h / 4);
-  const cTop: RGB = opts.accent ? [255, 170, 50] : opts.active ? [255, 220, 170] : [240, 235, 225];
-  const cBot: RGB = opts.accent ? [200, 115, 10] : opts.active ? [230, 190, 130] : [210, 205, 195];
-  vGradient(ctx, x1 + 2, y1 + 2, x2 - 2, y1 + h / 2, cTop, cBot);
-  vGradient(ctx, x1 + 2, y1 + h / 2, x2 - 2, y2 - 2, cBot, cTop);
-  styledRect(ctx, x1, y1, x2, y2, { border: [60, 60, 60], thickness: 1, radius: r });
-  ctx.save();
-  ctx.fillStyle = cssRgb(opts.textColor ?? [15, 15, 15]);
-  ctx.font = `${opts.bold ? "700" : "600"} ${opts.px ?? 13}px 'Segoe UI', system-ui, sans-serif`;
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(label, x1 + w / 2, y1 + h / 2);
-  ctx.restore();
-}
-
 export function drawXpTitleBar(
   ctx: CanvasRenderingContext2D,
   x1: number, y1: number, x2: number, y2: number,
@@ -132,17 +111,4 @@ export function drawXpProgressBar(ctx: CanvasRenderingContext2D, x1: number, y1:
     const fillW = Math.max(4, w * Math.min(1, progress));
     vGradient(ctx, x1 + 2, y1 + 2, x1 + fillW - 1, y2 - 1, [110, 210, 80], [50, 160, 20]);
   }
-}
-
-export function wrapText(ctx: CanvasRenderingContext2D, text: string, x: number, y: number, maxW: number, lineH: number): void {
-  const words = text.split(" ");
-  let line = "";
-  let yy = y;
-  for (const w of words) {
-    const test = line ? line + " " + w : w;
-    if (ctx.measureText(test).width > maxW && line) {
-      ctx.fillText(line, x, yy); yy += lineH; line = w;
-    } else line = test;
-  }
-  if (line) ctx.fillText(line, x, yy);
 }

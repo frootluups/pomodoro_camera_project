@@ -1,4 +1,4 @@
-# generated at runtime
+# generated at runtime (matches apps/python/layout.json, apps/python/settings.json, etc.)
 layout.json
 settings.json
 __pycache__/
@@ -15,9 +15,8 @@ Thumbs.db
 .vscode/
 .idea/
 
-# web / TypeScript 7
+# web / TypeScript 7 (dist/ above already covers apps/web/dist and apps/embed/dist)
 node_modules/
-dist/
 .npm/
 vite.svg
 *.tsbuildinfo

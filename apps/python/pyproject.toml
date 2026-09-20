@@ -2,7 +2,7 @@
 name = "pomodoro-camera"
 version = "1.0.0"
 description = "Focus-aware Pomodoro timer with webcam tracking — OpenCV + Pillow, themed UI, draggable layout"
-readme = "README.md"
+readme = "../../README.md"
 requires-python = ">=3.11"
 dependencies = [
     "opencv-python>=4.10.0,<5",

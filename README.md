@@ -30,11 +30,12 @@ python -m venv .venv
 # macOS/Linux
 source .venv/bin/activate
 
-pip install -r requirements.txt
-python main.py
+pip install -r apps/python/requirements.txt
+python apps/python/main.py
+# or: cd apps/python && python main.py
 ```
 
-Or as installed script (after `pip install -e .` with `pyproject.toml`):
+Or as installed script (after `pip install -e apps/python` with `apps/python/pyproject.toml`):
 
 ```bash
 pomodoro-camera
@@ -44,8 +45,9 @@ pomodoro-camera
 
 ```bash
 npm install
-npm run dev      # http://localhost:5173
-npm run build    # -> dist/
+npm run dev         # web app → http://localhost:5173 (apps/web)
+npm run dev:embed   # embed preview → http://localhost:5174 (apps/embed)
+npm run build       # → apps/web/dist/
 npm run preview
 ```
 
@@ -93,8 +95,10 @@ Attributes: `theme="dark|light|xp"`, `pomodoro="25"`, `break="5"`, `camera="fals
 ```
 
 Build outputs:
-- `npm run build` → `dist/index.html` + `dist/embed.html` (multi-page)
-- `npm run build:embed` → `dist/pomodoro-embed.js` + `dist/pomodoro-embed.umd.js` (single-file library for CDN)
+- `npm run build` → `apps/web/dist/index.html` (web app)
+- `npm run build:embed-app` → `apps/embed/dist/embed.html` + `embed-demo.html` (embed preview)
+- `npm run build:embed` → `apps/embed/dist/pomodoro-embed.js` + `pomodoro-embed.umd.js` (single-file library for CDN)
+- `npm run build:all` → all three above
 
 **Option D — npm package (if published):**
 
@@ -120,38 +124,48 @@ import { mountPomodoro } from "pomodoro-camera-web/embed";
 
 ## Persistence
 
-- `layout.json` / `localStorage:pomodoro.layout.v1` — grid positions for `timer_popup`, `phase_label`, `progress_bar`, `focus_display`, `status_display`, `main_buttons`, `quit_hint`; auto-created, merged on update, healed if corrupt
-- `settings.json` / `localStorage:pomodoro.settings.v1` — `ui_scale`, `theme`, `corner_style`, `alerts_enabled`; written on change / onboarding finish
+- `apps/python/layout.json` / `localStorage:pomodoro.layout.v1` — grid positions for `timer_popup`, `phase_label`, `progress_bar`, `focus_display`, `status_display`, `main_buttons`, `quit_hint`; auto-created, merged on update, healed if corrupt
+- `apps/python/settings.json` / `localStorage:pomodoro.settings.v1` — `ui_scale`, `theme`, `corner_style`, `alerts_enabled`; written on change / onboarding finish
 
 Delete either file (or clear localStorage) to reset to defaults.
 
-## Architecture
+## Project structure
 
 ```
-main.py:2762 lines — single-file, sectioned backend
-  ├─ constants & StrEnum (Phase, ThemeName, FocusState, CornerStyle, DisplayMode)
-  ├─ FontEngine (Pillow + Hershey, LRU-cached text_size / fit_text, numpy gradients)
-  ├─ Layout (UIElementConfig, LayoutConfig, LayoutManager — grid → pixel rects)
-  ├─ Rendering (styled_rect, _h/_v_gradient, _xp_button/title/progress)
-  ├─ OnboardingManager (6 steps, _card_rects hit-test, draw_overlay)
-  ├─ ButtonHandler (layout-driven hit-test)
-  └─ PomodoroTimer
-       ├─ timer state machine (_update_timer, switch_*)
-       ├─ vision (analyze_focus — face every 3rd frame, motion penalty)
-       ├─ rendering (_draw_ui → _draw_* helpers, theme-aware)
-       ├─ I/O (camera via VideoCapture, window loop, persistence)
-       └─ main() entrypoint
-
-src/ (TypeScript 7): Vite web port — mirrors Python modules
+apps/python/ — OpenCV desktop app
+  ├─ main.py — single-file, sectioned backend
+  │    ├─ constants & StrEnum (Phase, ThemeName, FocusState, CornerStyle, DisplayMode)
+  │    ├─ FontEngine (Pillow + Hershey, LRU-cached text_size / fit_text, numpy gradients)
+  │    ├─ Layout (UIElementConfig, LayoutConfig, LayoutManager — grid → pixel rects)
+  │    ├─ Rendering (styled_rect, _h/_v_gradient, _xp_button/title/progress)
+  │    ├─ OnboardingManager (6 steps, _card_rects hit-test, draw_overlay)
+  │    ├─ ButtonHandler (layout-driven hit-test)
+  │    └─ PomodoroTimer
+  │         ├─ timer state machine (_update_timer, switch_*)
+  │         ├─ vision (analyze_focus — face every 3rd frame, motion penalty)
+  │         ├─ rendering (_draw_ui → _draw_* helpers, theme-aware)
+  │         ├─ I/O (camera via VideoCapture, window loop, persistence)
+  │         └─ main() entrypoint
+  ├─ tests/ (pytest: test_layout, test_render, test_tracking)
+  ├─ haarcascade_frontalface_default.xml, requirements.txt, pyproject.toml
+  └─ layout.json / settings.json (runtime, gitignored)
+apps/web/ — standalone browser app (Vite)
+  ├─ index.html, vite.config.ts, public/ (manifest.json, sw.js)
+  └─ src/main.ts (boot — imports shared core)
+apps/embed/ — embeddable widget (Vite)
+  ├─ embed.html, embed-demo.html, vite.config.ts (preview), vite.embed.config.ts (library)
+  └─ src/embed.ts (<pomodoro-camera> element + mount API — imports shared core)
+packages/core/ — shared TypeScript core (imported by web + embed)
   ├─ constants.ts, types.ts, theme.ts
   ├─ tracker.ts (MultiPersonTracker), gallery.ts (FaceGallery)
   ├─ layout.ts (LayoutManager + localStorage), render.ts (Canvas 2D)
   ├─ vision.ts (FaceDetector/BlazeFace + motion), pomodoro.ts (state machine)
   ├─ app.ts (camera, canvas loop, drag, settings, onboarding)
-  └─ main.ts (boot)
+  ├─ history.ts, onboarding.ts, workers/motion.worker.ts
+  └─ package.json (@pomodoro/core, private)
 ```
 
-Hot-path notes (see `main.py:91-179`, `main.py:365-532`):
+Hot-path notes (see `apps/python/main.py:91-179`, `apps/python/main.py:365-532`):
 
 - `text_size` cached (≤2048 entries), `fit_text` cached (≤1024), Pillow font cache
 - `_h_gradient` / `_v_gradient` numpy-vectorized (`linspace` + outer)
@@ -160,7 +174,7 @@ Hot-path notes (see `main.py:91-179`, `main.py:365-532`):
 
 ## Performance
 
-Measured on 640×480 canvas, 30-frame average (`python -c "from main import PomodoroTimer ..."`):
+Measured on 640×480 canvas, 30-frame average (`cd apps/python && python -c "from main import PomodoroTimer ..."`):
 
 - XP theme ~3.5 ms / frame (~285 FPS)
 - Dark theme ~3.5 ms / frame (~290 FPS)
@@ -171,6 +185,7 @@ Measured on 640×480 canvas, 30-frame average (`python -c "from main import Pomo
 Pass custom durations / mode programmatically:
 
 ```python
+# run from apps/python/
 from main import PomodoroTimer, DisplayMode
 t = PomodoroTimer(session_duration_minutes=30, break_duration_minutes=10, display_mode=DisplayMode.BOTH)
 t.start_session()
@@ -187,16 +202,17 @@ t.start_session()
 ## Tests
 
 ```bash
+cd apps/python
 pytest -q
 # or quick render-matrix smoke test:
 python -c "import tests.test_render; tests.test_render.test_matrix()"
 ```
 
-See `tests/test_render.py` and `tests/test_layout.py`.
+See `apps/python/tests/test_render.py` and `apps/python/tests/test_layout.py`.
 
 ## Future Improvements
 
-- Advanced face recognition re-ID (SFace/gallery already stubbed in `gallery.ts`)
+- Advanced face recognition re-ID (SFace/gallery already stubbed in `packages/core/src/gallery.ts`)
 - Audio-based focus detection
 - ML attention prediction, eye movement / blink rate
 - Multiple cameras, user profiles / habit tracking
@@ -206,5 +222,5 @@ See `tests/test_render.py` and `tests/test_layout.py`.
 
 - `numpy.core.multiarray failed to import` / `_ARRAY_API not found` → upgrade OpenCV: `pip install -U "opencv-python>=4.10"`
 - Camera not opening → close other apps using webcam, check `cv2.VideoCapture(0)`; toggle `Camera: Off/On` in Settings (web: check `getUserMedia` permission)
-- Layout broken after manual edit → delete `layout.json` and restart (web: clear localStorage)
+- Layout broken after manual edit → delete `apps/python/layout.json` and restart (web: clear localStorage)
 - No Pillow → installs Hershey fallback; `pip install pillow` for Segoe UI

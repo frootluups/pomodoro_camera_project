@@ -6,7 +6,8 @@ import { LayoutConfig, LayoutManager } from "./layout.ts";
 import { PomodoroTimer } from "./pomodoro.ts";
 import { VisionEngine } from "./vision.ts";
 import { OnboardingManager } from "./onboarding.ts";
-import { styledRect, hGradient, drawXpProgressBar, drawXpTitleBar } from "./render.ts";
+import { styledRect, drawXpProgressBar, drawXpTitleBar } from "./render.ts";
+import { getHistory } from "./history.ts";
 
 // DOM refs — injected by main.ts or embed.ts (shadow DOM)
 export interface AppDeps {
@@ -338,16 +339,15 @@ export class PomodoroApp {
     const el = this.deps.settingsDialog.querySelector("#history-stats") as HTMLElement | null;
     if (!el) return;
     try {
-      const { getHistory } = require("./history.ts") as { getHistory: () => { getStats: () => { todayPomodoros: number; todayFocusAvg: number; totalPomodoros: number; streak: number } } };
       const s = getHistory().getStats();
-      el.textContent = `Today: ${s.todayPomodoros} pomodoros · Focus ${s.todayFocusAvg}% · Streak ${s.streak} · Total ${s.totalPomodoros}`;
+      el.textContent = `Today: ${s.todayPomodoros} pomodoros \u00B7 Focus ${s.todayFocusAvg}% \u00B7 Streak ${s.streak} \u00B7 Total ${s.totalPomodoros}`;
     } catch {
       try {
         const raw = localStorage.getItem("pomodoro.history.v1");
         const arr = raw ? JSON.parse(raw) as { phase: string; completed: boolean; startedAt: number }[] : [];
         const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
         const today = arr.filter((r) => r.phase === "pomodoro" && r.completed && r.startedAt >= todayStart.getTime()).length;
-        el.textContent = `Today: ${today} pomodoros · Total ${arr.filter((r) => r.phase === "pomodoro" && r.completed).length}`;
+        el.textContent = `Today: ${today} pomodoros \u00B7 Total ${arr.filter((r) => r.phase === "pomodoro" && r.completed).length}`;
       } catch { el.textContent = ""; }
     }
   }
@@ -359,7 +359,6 @@ export class PomodoroApp {
     if (!ctx) return;
     let samples: { t: number; score: number }[] = [];
     try {
-      const { getHistory } = require("./history.ts") as { getHistory: () => { getRecentFocus: (m: number) => { t: number; score: number }[] } };
       samples = getHistory().getRecentFocus(10);
     } catch {
       try {
@@ -396,7 +395,6 @@ export class PomodoroApp {
   private exportHistory(format: "json" | "csv"): void {
     let content = "", mime = "application/json", ext = "json";
     try {
-      const { getHistory } = require("./history.ts") as { getHistory: () => { exportJSON: () => string; exportCSV: () => string } };
       const h = getHistory();
       content = format === "csv" ? h.exportCSV() : h.exportJSON();
       mime = format === "csv" ? "text/csv" : "application/json";
@@ -413,7 +411,6 @@ export class PomodoroApp {
 
   private clearHistory(): void {
     try {
-      const { getHistory } = require("./history.ts") as { getHistory: () => { clear: () => void } };
       getHistory().clear();
     } catch {
       try { localStorage.removeItem("pomodoro.history.v1"); localStorage.removeItem("pomodoro.focus.v1"); } catch {}
@@ -522,6 +519,9 @@ export class PomodoroApp {
       this.timer.playAlertSound();
     }
 
+    // Live stats HUD — always visible when running
+    if (this.timer.isRunning) this.drawLiveStatsHud(w, h, theme, rounded, uiScale);
+
     // Layout edit overlay
     if (this.layoutEditMode) this.drawEditOverlay(w, h, theme, rounded, uiScale);
 
@@ -542,7 +542,8 @@ export class PomodoroApp {
 
     const isSlacking = this.timer.focusState === FocusState.Slacking && this.timer.isRunning;
     const isConcentrated = this.timer.focusState === FocusState.Concentrated;
-    for (const p of list) {
+    for (let idx = 0; idx < list.length; idx++) {
+      const p = list[idx]!;
       const [x1s, y1s, x2s, y2s] = p.smooth as unknown as [number, number, number, number];
       // mirror X (video is CSS scaleX(-1))
       const mx1 = vw - x2s, mx2 = vw - x1s;
@@ -550,15 +551,27 @@ export class PomodoroApp {
       const pad = 6; bx1 -= pad; by1 -= pad; bx2 += pad; by2 += pad;
       const bw = bx2 - bx1, bh = by2 - by1;
       if (bw < 10 || bh < 10) continue;
+      const eyeOk = this.vision.eyeVerified[idx] ?? true;
       const color: [number, number, number] = isSlacking ? [60, 60, 255] : isConcentrated ? theme.onColor as [number, number, number] : (p.color as [number, number, number]);
       const thick = isSlacking ? 3 : 2;
       const r = rounded ? Math.min(bw, bh) * 0.14 : 0;
       styledRect(this.ctx, bx1, by1, bx2, by2, { border: color, thickness: thick, radius: r });
+      // eye indicator dot on top-right of face box
+      if (bw > 40 && bh > 40) {
+        const dotR = Math.max(4, Math.min(7, bh * 0.06));
+        const dotX = bx2 - dotR - 4, dotY = by1 + dotR + 4;
+        this.ctx.save();
+        this.ctx.beginPath(); this.ctx.arc(dotX, dotY, dotR, 0, Math.PI * 2);
+        this.ctx.fillStyle = eyeOk ? "rgba(80,200,80,0.95)" : "rgba(200,80,80,0.85)";
+        this.ctx.fill();
+        this.ctx.strokeStyle = "rgba(255,255,255,0.9)"; this.ctx.lineWidth = 1; this.ctx.stroke();
+        this.ctx.restore();
+      }
       // ID pill
       if (bw > 60 && bh > 60) {
         this.ctx.save();
         this.ctx.font = `700 ${Math.max(9, bh * 0.095)}px 'Segoe UI', sans-serif`;
-        const label = `#${p.pid}`;
+        const label = `#${p.pid}${eyeOk ? " 👁" : " ○"}`;
         const tw = this.ctx.measureText(label).width;
         const px1 = bx1 + 4, py1 = Math.max(0, by1 + 4);
         styledRect(this.ctx, px1 - 3, py1 - 1, px1 + tw + 3, py1 + 14, { fill: [color[0] * 0.38, color[1] * 0.38, color[2] * 0.38] as [number, number, number], radius: 3 });
@@ -658,13 +671,18 @@ export class PomodoroApp {
     const [x1, y1, x2, y2] = this.layout.getElementRect("focus_display", fw, fh);
     if (x2 - x1 <= 4 || y2 - y1 <= 4) return;
     const n = this.vision.tracker.active.length;
-    const txt = !this.timer.isRunning ? `Ready${n ? ` · ${n}` : ""}` : `${this.timer.focusState[0]?.toUpperCase()}${this.timer.focusState.slice(1)}${n > 1 ? ` · ${n}` : ""}`;
+    const eyeN = this.vision.eyeVerifiedCount;
+    const score = Math.round(this.timer.focusScore);
+    let txt: string;
+    if (!this.timer.isRunning) txt = `Ready${n ? ` · ${n}` : ""}`;
+    else if (n === 0) txt = `${this.timer.focusState[0]?.toUpperCase()}${this.timer.focusState.slice(1)}`;
+    else if (n === 1) txt = `${this.timer.focusState[0]?.toUpperCase()}${this.timer.focusState.slice(1)} ${score}%${eyeN ? " · 👁" : " · ○"}`;
+    else txt = `${this.timer.focusState[0]?.toUpperCase()}${this.timer.focusState.slice(1)} ${score}% · ${n} (${eyeN}👁)`;
     this.ctx.save();
     const h = y2 - y1; let px = Math.max(10, h * 0.5 * uiScale);
     this.ctx.font = `600 ${px}px 'Segoe UI', sans-serif`;
     if (this.ctx.measureText(txt).width > (x2 - x1) - 14) {
       let lo = 16, hi = Math.round(px * 2), best = 8;
-      // Binary search for fitting size (px is float, search integer*0.5 steps)
       lo = 16; hi = Math.round(px * 2);
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
@@ -679,9 +697,90 @@ export class PomodoroApp {
     const tw = this.ctx.measureText(txt).width, th = px * 0.9;
     const pillW = tw + 14, pillH = th + 8;
     const px1 = x1 + 4, py1 = y1 + (y2 - y1 - pillH) / 2;
+    const isConcentrated = this.timer.isRunning && this.timer.focusState === FocusState.Concentrated;
+    const isSlacking = this.timer.isRunning && this.timer.focusState === FocusState.Slacking;
+    const borderCol: [number, number, number] = isConcentrated ? theme.onColor as [number, number, number] : isSlacking ? [60, 60, 255] : [60, 60, 68];
     this.ctx.globalAlpha = 0.62; styledRect(this.ctx, px1, py1, px1 + pillW, py1 + pillH, { fill: [28, 28, 32], radius: pillH / 2 }); this.ctx.globalAlpha = 1;
-    styledRect(this.ctx, px1, py1, px1 + pillW, py1 + pillH, { border: [60, 60, 68], thickness: 1, radius: pillH / 2 });
+    styledRect(this.ctx, px1, py1, px1 + pillW, py1 + pillH, { border: borderCol, thickness: 1, radius: pillH / 2 });
     this.ctx.fillStyle = `rgb(${theme.text[0]} ${theme.text[1]} ${theme.text[2]})`; this.ctx.textAlign = "center"; this.ctx.textBaseline = "middle"; this.ctx.fillText(txt, px1 + pillW / 2, py1 + pillH / 2);
+    // live sparkline below pill when running
+    if (this.timer.isRunning && this.vision.liveFocusHistory.length >= 4) {
+      const hist = this.vision.liveFocusHistory;
+      const spX1 = px1, spY1 = py1 + pillH + 4;
+      const spW = Math.min(pillW, 140), spH = 22;
+      const spX2 = spX1 + spW, spY2 = spY1 + spH;
+      if (spY2 < y2) {
+        this.ctx.globalAlpha = 0.55; styledRect(this.ctx, spX1, spY1, spX2, spY2, { fill: [22, 22, 26], radius: 4 }); this.ctx.globalAlpha = 1;
+        styledRect(this.ctx, spX1, spY1, spX2, spY2, { border: [50, 50, 58], thickness: 1, radius: 4 });
+        const scores = hist.slice(-30).map((s) => s.score);
+        if (scores.length >= 2) {
+          for (let i = 0; i < scores.length - 1; i++) {
+            const xa = spX1 + 2 + (i / Math.max(1, scores.length - 1)) * (spW - 4);
+            const xb = spX1 + 2 + ((i + 1) / Math.max(1, scores.length - 1)) * (spW - 4);
+            const ya = spY2 - 2 - (scores[i]! / 100) * (spH - 4);
+            const yb = spY2 - 2 - (scores[i + 1]! / 100) * (spH - 4);
+            const col: [number, number, number] = scores[i]! >= 70 ? theme.onColor as [number, number, number] : scores[i]! <= 35 ? [60, 60, 255] : theme.accent as [number, number, number];
+            this.ctx.strokeStyle = `rgb(${col[0]} ${col[1]} ${col[2]})`; this.ctx.lineWidth = 1;
+            this.ctx.beginPath(); this.ctx.moveTo(xa, ya); this.ctx.lineTo(xb, yb); this.ctx.stroke();
+          }
+        }
+        const y70 = spY2 - 2 - 0.70 * (spH - 4), y35 = spY2 - 2 - 0.35 * (spH - 4);
+        this.ctx.strokeStyle = "rgba(80,180,80,0.5)"; this.ctx.setLineDash([3, 3]); this.ctx.beginPath(); this.ctx.moveTo(spX1 + 2, y70); this.ctx.lineTo(spX2 - 2, y70); this.ctx.stroke();
+        this.ctx.strokeStyle = "rgba(180,80,80,0.5)"; this.ctx.beginPath(); this.ctx.moveTo(spX1 + 2, y35); this.ctx.lineTo(spX2 - 2, y35); this.ctx.stroke();
+        this.ctx.setLineDash([]);
+      }
+    }
+    this.ctx.restore();
+  }
+
+  private drawLiveStatsHud(fw: number, fh: number, theme: ReturnType<typeof getTheme>, rounded: boolean, uiScale: number): void {
+    const stats = this.vision.liveStats;
+    const total = stats.frames || 1;
+    const focusedPct = Math.round((stats.focused / total) * 100);
+    const slackingPct = Math.round((stats.slacking / total) * 100);
+    const neutralPct = 100 - focusedPct - slackingPct;
+    const score = Math.round(this.timer.focusScore);
+    const n = this.vision.tracker.active.length;
+    const eyeN = this.vision.eyeVerifiedCount;
+    // HUD in top-right corner, compact
+    const hudW = 148, hudH = 62;
+    const hx1 = fw - hudW - 10, hy1 = 10, hx2 = hx1 + hudW, hy2 = hy1 + hudH;
+    this.ctx.save();
+    this.ctx.globalAlpha = 0.72; styledRect(this.ctx, hx1, hy1, hx2, hy2, { fill: [22, 22, 26], radius: rounded ? 8 : 0 }); this.ctx.globalAlpha = 1;
+    styledRect(this.ctx, hx1, hy1, hx2, hy2, { border: [50, 50, 58], thickness: 1, radius: rounded ? 8 : 0 });
+    // Title
+    this.ctx.fillStyle = `rgb(${theme.subtext[0]} ${theme.subtext[1]} ${theme.subtext[2]})`;
+    this.ctx.font = `600 ${Math.max(9, 10 * uiScale)}px 'Segoe UI', sans-serif`;
+    this.ctx.textBaseline = "top"; this.ctx.textAlign = "left";
+    this.ctx.fillText("LIVE STATS", hx1 + 8, hy1 + 6);
+    // Score + eye
+    this.ctx.fillStyle = `rgb(${theme.text[0]} ${theme.text[1]} ${theme.text[2]})`;
+    this.ctx.font = `700 ${Math.max(11, 13 * uiScale)}px 'Segoe UI', sans-serif`;
+    const eyeLabel = n ? (eyeN ? ` 👁${eyeN}/${n}` : " ○") : "";
+    this.ctx.fillText(`${score}%${eyeLabel}`, hx1 + 8, hy1 + 20);
+    // Focus bar: green / gray / red segments
+    const barX = hx1 + 8, barY = hy1 + 38, barW = hudW - 16, barH = 8;
+    const r = barH / 2;
+    styledRect(this.ctx, barX, barY, barX + barW, barY + barH, { fill: [38, 38, 42], radius: r });
+    let curX = barX;
+    if (focusedPct > 0) {
+      const w = Math.round((focusedPct / 100) * barW);
+      styledRect(this.ctx, curX, barY, curX + w, barY + barH, { fill: theme.onColor as [number, number, number], radius: r });
+      curX += w;
+    }
+    if (neutralPct > 0) {
+      const w = Math.round((neutralPct / 100) * barW);
+      styledRect(this.ctx, curX, barY, curX + w, barY + barH, { fill: [90, 90, 100], radius: r });
+      curX += w;
+    }
+    if (slackingPct > 0) {
+      const w = barX + barW - curX;
+      if (w > 0) styledRect(this.ctx, curX, barY, curX + w, barY + barH, { fill: [200, 60, 60], radius: r });
+    }
+    // Legend
+    this.ctx.font = `400 ${Math.max(7, 8 * uiScale)}px 'Segoe UI', sans-serif`;
+    this.ctx.fillStyle = `rgb(${theme.subtext[0]} ${theme.subtext[1]} ${theme.subtext[2]})`;
+    this.ctx.fillText(`${focusedPct}% ●  ${neutralPct}% ●  ${slackingPct}%`, barX, barY + barH + 4);
     this.ctx.restore();
   }
 
@@ -797,11 +896,9 @@ export class PomodoroApp {
           window.dispatchEvent(new CustomEvent("pomodoro:focus", { detail: { score, state: this.timer.focusState } }));
           window.parent?.postMessage({ type: "pomodoro:focus", score, state: this.timer.focusState }, "*");
         } catch {}
-        // throttle focus samples to 1Hz
         if (now - this.lastFocusSampleTs >= 1000) {
           this.lastFocusSampleTs = now;
           try {
-            const { getHistory } = require("./history.ts") as { getHistory: () => { addFocusSample: (s: number) => void } };
             getHistory().addFocusSample(score);
           } catch {
             try {

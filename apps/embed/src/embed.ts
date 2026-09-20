@@ -1,16 +1,16 @@
-// src/embed.ts — Embeddable Pomodoro Camera widget
+// apps/embed/src/embed.ts — Embeddable Pomodoro Camera widget
 // Provides: <pomodoro-camera> custom element + window.PomodoroCamera API + iframe support
 // Usage:
-//   <script type="module" src="/dist/pomodoro-embed.js"></script>
+//   <script type="module" src="/apps/embed/dist/pomodoro-embed.js"></script>
 //   <pomodoro-camera theme="dark" pomodoro="25" break="5"></pomodoro-camera>
 // Or:
 //   <div id="my-widget"></div>
 //   <script> PomodoroCamera.mount('#my-widget', { theme: 'dark' }) </script>
 // Or iframe:
-//   <iframe src="/embed.html?theme=dark" allow="camera; microphone" width="420" height="600"></iframe>
+//   <iframe src="/apps/embed/embed.html?theme=dark" allow="camera; microphone" width="420" height="600"></iframe>
 
-import { PomodoroApp } from "./app.ts";
-import type { AppDeps } from "./app.ts";
+import { PomodoroApp } from "../../../packages/core/src/app.ts";
+import type { AppDeps } from "../../../packages/core/src/app.ts";
 
 // Inline the widget CSS — scoped to shadow DOM, no global pollution
 const WIDGET_CSS = `

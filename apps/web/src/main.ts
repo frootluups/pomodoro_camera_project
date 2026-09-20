@@ -1,6 +1,6 @@
-// src/main.ts — entrypoint (browser). Mirrors main.py:main()
+// apps/web/src/main.ts — web entrypoint (browser). Mirrors apps/python/main.py:main()
 import "./style.css";
-import { PomodoroApp } from "./app.ts";
+import { PomodoroApp } from "../../../packages/core/src/app.ts";
 
 function qs<T extends HTMLElement>(sel: string): T {
   const el = document.querySelector(sel);
