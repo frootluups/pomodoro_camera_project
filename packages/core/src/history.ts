@@ -8,6 +8,8 @@ export interface SessionRecord {
   completed: boolean;
   focusAvg?: number;
   person?: string;
+  taskId?: string;
+  taskTitle?: string;
 }
 
 export interface FocusSample {
@@ -108,14 +110,37 @@ export class HistoryStore {
     } catch {}
   }
 
-  exportJSON(): string {
-    return JSON.stringify({ records: this.records, focusSamples: this.focusSamples, exportedAt: new Date().toISOString() }, null, 2);
+  countByTask(): Map<string, { title: string; pomodoros: number }> {
+    const m = new Map<string, { title: string; pomodoros: number }>();
+    for (const r of this.records) {
+      if (r.phase !== "pomodoro" || !r.completed || !r.taskId) continue;
+      const e = m.get(r.taskId) ?? { title: r.taskTitle ?? r.taskId, pomodoros: 0 };
+      e.pomodoros++;
+      if (r.taskTitle) e.title = r.taskTitle;
+      m.set(r.taskId, e);
+    }
+    return m;
+  }
+
+  exportJSON(tasks?: { id: string; title: string; done: boolean; createdAt: number; completedAt?: number }[]): string {
+    return JSON.stringify(
+      { records: this.records, focusSamples: this.focusSamples, ...(tasks ? { tasks } : {}), exportedAt: new Date().toISOString() },
+      null,
+      2
+    );
   }
 
   exportCSV(): string {
-    const header = "id,phase,startedAt,endedAt,durationSec,completed,focusAvg,person";
+    const esc = (v: string | number | boolean | undefined): string => {
+      if (v === undefined || v === null) return "";
+      const s = String(v);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+    const header = "id,phase,startedAt,endedAt,durationSec,completed,focusAvg,person,taskId,taskTitle";
     const rows = this.records.map((r) =>
-      [r.id, r.phase, new Date(r.startedAt).toISOString(), new Date(r.endedAt).toISOString(), r.durationSec, r.completed, r.focusAvg ?? "", r.person ?? ""].join(",")
+      [r.id, r.phase, new Date(r.startedAt).toISOString(), new Date(r.endedAt).toISOString(), r.durationSec, r.completed, r.focusAvg ?? "", r.person ?? "", r.taskId ?? "", r.taskTitle ?? ""]
+        .map(esc)
+        .join(",")
     );
     return [header, ...rows].join("\n");
   }

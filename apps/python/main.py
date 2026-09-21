@@ -11,12 +11,16 @@ Controls:
     s             start / pause timer
     e             toggle layout edit mode
     n             name the primary tracked face (type + Enter, Esc cancels)
+    t             cycle active task / T (shift) new task (type + Enter, Esc cancels)
+    h             export session history to history.csv
     Esc           exit edit mode / skip onboarding
 
 Persistence:
     layout.json   grid positions for UI tiles
     settings.json theme, scale, alerts, corner style
     gallery.json  face re-ID embeddings + custom names (auto-created)
+    tasks.json    local task list + active task (auto-created)
+    history.json  session records with person + task attribution (auto-created)
 """
 
 from __future__ import annotations
@@ -69,6 +73,10 @@ LAYOUT_FILE: Final = _APP_DIR / "layout.json"
 SETTINGS_FILE: Final = _APP_DIR / "settings.json"
 GALLERY_FILE: Final = _APP_DIR / "gallery.json"
 GALLERY_NAME_MAX: Final = 24
+TASKS_FILE: Final = _APP_DIR / "tasks.json"
+HISTORY_FILE: Final = _APP_DIR / "history.json"
+TASK_TITLE_MAX: Final = 60
+HISTORY_MAX_RECORDS: Final = 500
 CASCADE_FILE: Final = "haarcascade_frontalface_default.xml"
 EYE_CASCADE_FILE: Final = "haarcascade_eye.xml"
 
@@ -483,6 +491,254 @@ def get_gallery() -> FaceGallery:
     if _GLOBAL_GALLERY is None:
         _GLOBAL_GALLERY = FaceGallery()
     return _GLOBAL_GALLERY
+
+
+# ---------------------------------------------------------------------------
+# Tasks — local task list + active task, mirrors TS TaskStore
+# ---------------------------------------------------------------------------
+class TaskStore:
+    """Local tasks persisted to tasks.json. Best-effort, never raises on I/O."""
+
+    def __init__(self, tasks_file: Path | None = None) -> None:
+        self.tasks_file: Path = tasks_file or TASKS_FILE
+        self.tasks: dict[str, dict[str, Any]] = {}  # id -> {id,title,done,createdAt,completedAt?}
+        self.active_id: str | None = None
+        self.load()
+
+    @staticmethod
+    def sanitize_title(title: str) -> str | None:
+        clean = " ".join(str(title).split())[:TASK_TITLE_MAX]
+        return clean or None
+
+    @staticmethod
+    def _uid() -> str:
+        import random
+
+        return f"{random.getrandbits(32):08x}{int(time.time() * 1000):x}"
+
+    def list(self) -> list[dict[str, Any]]:
+        return sorted(self.tasks.values(), key=lambda t: t.get("createdAt", 0))
+
+    def get(self, tid: str) -> dict[str, Any] | None:
+        return self.tasks.get(tid)
+
+    def get_active(self) -> dict[str, Any] | None:
+        return self.tasks.get(self.active_id) if self.active_id else None
+
+    def add(self, title: str) -> dict[str, Any] | None:
+        clean = self.sanitize_title(title)
+        if not clean:
+            return None
+        tid = self._uid()
+        task = {"id": tid, "title": clean, "done": False, "createdAt": int(time.time() * 1000)}
+        self.tasks[tid] = task
+        if not self.active_id:
+            self.active_id = tid
+        self.save()
+        return task
+
+    def rename(self, tid: str, title: str) -> str | None:
+        task = self.tasks.get(tid)
+        if not task:
+            return None
+        clean = self.sanitize_title(title)
+        if not clean:
+            return None
+        task["title"] = clean
+        self.save()
+        return clean
+
+    def toggle_done(self, tid: str) -> bool | None:
+        task = self.tasks.get(tid)
+        if not task:
+            return None
+        task["done"] = not task.get("done", False)
+        if task["done"]:
+            task["completedAt"] = int(time.time() * 1000)
+        else:
+            task.pop("completedAt", None)
+        self.save()
+        return bool(task["done"])
+
+    def remove(self, tid: str) -> bool:
+        had = self.tasks.pop(tid, None) is not None
+        if self.active_id == tid:
+            nxt = next((t for t in self.list() if not t.get("done")), None) or (self.list()[0] if self.list() else None)
+            self.active_id = nxt["id"] if nxt else None
+        if had:
+            self.save()
+        return had
+
+    def clear_completed(self) -> int:
+        done_ids = [tid for tid, t in self.tasks.items() if t.get("done")]
+        for tid in done_ids:
+            del self.tasks[tid]
+        if self.active_id and self.active_id not in self.tasks:
+            nxt = next((t for t in self.list() if not t.get("done")), None) or (self.list()[0] if self.list() else None)
+            self.active_id = nxt["id"] if nxt else None
+        if done_ids:
+            self.save()
+        return len(done_ids)
+
+    def set_active(self, tid: str | None) -> None:
+        if tid is not None and tid not in self.tasks:
+            return
+        self.active_id = tid
+        self.save()
+
+    def cycle_active(self) -> dict[str, Any] | None:
+        open_tasks = [t for t in self.list() if not t.get("done")]
+        if not open_tasks:
+            return None
+        try:
+            idx = next(i for i, t in enumerate(open_tasks) if t["id"] == self.active_id)
+        except StopIteration:
+            idx = -1
+        nxt = open_tasks[(idx + 1) % len(open_tasks)]
+        self.set_active(nxt["id"])
+        return nxt
+
+    def save(self) -> None:
+        try:
+            self.tasks_file.write_text(json.dumps({"version": 1, "tasks": self.list(), "activeId": self.active_id}, indent=2), encoding="utf-8")
+        except Exception as exc:
+            log.debug("Tasks save failed: %s", exc)
+
+    def load(self) -> None:
+        try:
+            if not self.tasks_file.exists():
+                return
+            data = json.loads(self.tasks_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("version") != 1:
+                return
+            raw_tasks = data.get("tasks")
+            if isinstance(raw_tasks, list):
+                for item in raw_tasks:
+                    if not isinstance(item, dict):
+                        continue
+                    tid = item.get("id")
+                    if not isinstance(tid, str) or not tid:
+                        continue
+                    clean = self.sanitize_title(item.get("title", "")) if isinstance(item.get("title"), str) else None
+                    if not clean:
+                        continue
+                    created = item.get("createdAt")
+                    if not isinstance(created, (int, float)) or not math.isfinite(float(created)):
+                        continue
+                    self.tasks[tid] = {"id": tid, "title": clean, "done": bool(item.get("done")), "createdAt": int(created)}
+                    if isinstance(item.get("completedAt"), (int, float)):
+                        self.tasks[tid]["completedAt"] = int(item["completedAt"])
+            aid = data.get("activeId")
+            if isinstance(aid, str) and aid in self.tasks:
+                self.active_id = aid
+        except Exception as exc:
+            log.warning("Tasks load failed: %s", exc)
+
+
+_GLOBAL_TASKS: TaskStore | None = None
+
+
+def get_tasks() -> TaskStore:
+    global _GLOBAL_TASKS
+    if _GLOBAL_TASKS is None:
+        _GLOBAL_TASKS = TaskStore()
+    return _GLOBAL_TASKS
+
+
+# ---------------------------------------------------------------------------
+# History — session records with person + task attribution, mirrors TS history
+# ---------------------------------------------------------------------------
+class HistoryStore:
+    """Session history persisted to history.json + CSV export. Best-effort I/O."""
+
+    def __init__(self, history_file: Path | None = None) -> None:
+        self.history_file: Path = history_file or HISTORY_FILE
+        self.records: list[dict[str, Any]] = []
+        self.load()
+
+    @staticmethod
+    def _uid() -> str:
+        import random
+
+        return f"{random.getrandbits(32):08x}{int(time.time() * 1000):x}"
+
+    def add(self, record: dict[str, Any]) -> dict[str, Any]:
+        rec = {"id": self._uid(), **record}
+        self.records.append(rec)
+        if len(self.records) > HISTORY_MAX_RECORDS:
+            self.records = self.records[-HISTORY_MAX_RECORDS:]
+        self.save()
+        return rec
+
+    def count_by_task(self) -> dict[str, dict[str, Any]]:
+        counts: dict[str, dict[str, Any]] = {}
+        for r in self.records:
+            if r.get("phase") != Phase.POMODORO or not r.get("completed") or not r.get("taskId"):
+                continue
+            tid = str(r["taskId"])
+            entry = counts.get(tid, {"title": str(r.get("taskTitle") or tid), "pomodoros": 0})
+            entry["pomodoros"] += 1
+            if r.get("taskTitle"):
+                entry["title"] = str(r["taskTitle"])
+            counts[tid] = entry
+        return counts
+
+    def save(self) -> None:
+        try:
+            self.history_file.write_text(json.dumps({"version": 1, "records": self.records[-HISTORY_MAX_RECORDS:]}, indent=2), encoding="utf-8")
+        except Exception as exc:
+            log.debug("History save failed: %s", exc)
+
+    def load(self) -> None:
+        try:
+            if not self.history_file.exists():
+                return
+            data = json.loads(self.history_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                return
+            raw = data.get("records") if isinstance(data.get("records"), list) else (data if isinstance(data, list) else None)
+            if not isinstance(raw, list):
+                return
+            for item in raw[-HISTORY_MAX_RECORDS:]:
+                if isinstance(item, dict) and isinstance(item.get("phase"), str) and isinstance(item.get("startedAt"), (int, float)):
+                    self.records.append(item)
+        except Exception as exc:
+            log.warning("History load failed: %s", exc)
+
+    def export_csv(self, dest: Path | None = None) -> Path:
+        import csv
+
+        target = dest or self.history_file.with_suffix(".csv")
+        header = ["id", "phase", "startedAt", "endedAt", "durationSec", "completed", "focusAvg", "person", "taskId", "taskTitle"]
+        try:
+            with target.open("w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=header, extrasaction="ignore")
+                writer.writeheader()
+                for r in self.records:
+                    row = dict(r)
+                    for k in ("startedAt", "endedAt"):
+                        v = row.get(k)
+                        if isinstance(v, (int, float)):
+                            try:
+                                from datetime import datetime, timezone
+
+                                row[k] = datetime.fromtimestamp(float(v) / 1000.0, tz=timezone.utc).isoformat()
+                            except Exception:
+                                pass
+                    writer.writerow({k: row.get(k, "") if row.get(k) is not None else "" for k in header})
+        except Exception as exc:
+            log.warning("History CSV export failed: %s", exc)
+        return target
+
+
+_GLOBAL_HISTORY: HistoryStore | None = None
+
+
+def get_history() -> HistoryStore:
+    global _GLOBAL_HISTORY
+    if _GLOBAL_HISTORY is None:
+        _GLOBAL_HISTORY = HistoryStore()
+    return _GLOBAL_HISTORY
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -1588,6 +1844,20 @@ class PomodoroTimer:
         self._last_gray: np.ndarray | None = None
         # in-window naming: None = idle, otherwise {"gid": int, "buffer": str}
         self._name_entry: dict[str, Any] | None = None
+        # in-window new-task entry: None = idle, otherwise {"buffer": str}
+        self._task_entry: dict[str, Any] | None = None
+        # history attribution: focus aggregate + person + task snapshot for the current phase
+        self._focus_sum: float = 0.0
+        self._focus_count: int = 0
+        self._phase_start_ms: int | None = None
+        self._current_person_label: str | None = None
+        try:
+            _active = get_tasks().get_active()
+            self._current_task_id: str | None = _active["id"] if _active else None
+            self._current_task_title: str | None = _active["title"] if _active else None
+        except Exception:
+            self._current_task_id = None
+            self._current_task_title = None
 
         self._load_settings()
 
@@ -2229,6 +2499,26 @@ class PomodoroTimer:
                 elif 32 <= key <= 126 and key != 255:
                     if len(str(entry["buffer"])) < GALLERY_NAME_MAX:
                         entry["buffer"] = str(entry["buffer"]) + chr(key)
+            elif getattr(self, "_task_entry", None) is not None:
+                entry = self._task_entry
+                if key in (13, 10):  # Enter — confirm new task
+                    try:
+                        task = get_tasks().add(str(entry["buffer"]))
+                        if task:
+                            self.set_task(task["id"], task["title"])
+                            log.info("Task added: '%s'", task["title"])
+                        else:
+                            log.warning("Task title empty — not added")
+                    except Exception as exc:
+                        log.warning("Task add failed: %s", exc)
+                    self._task_entry = None
+                elif key == 27:  # Esc — cancel
+                    self._task_entry = None
+                elif key in (8, 127):  # Backspace
+                    entry["buffer"] = str(entry["buffer"])[:-1]
+                elif 32 <= key <= 126 and key != 255:
+                    if len(str(entry["buffer"])) < TASK_TITLE_MAX:
+                        entry["buffer"] = str(entry["buffer"]) + chr(key)
             elif key == ord("q"):
                 self.session_open = False
             elif key == ord("s"):
@@ -2252,6 +2542,26 @@ class PomodoroTimer:
                         self.settings_visible = False
                     except Exception as exc:
                         log.debug("Name entry failed: %s", exc)
+            elif key == ord("t"):
+                # cycle active task (lowercase)
+                try:
+                    nxt = get_tasks().cycle_active()
+                    self.sync_task_from_store()
+                    if nxt:
+                        log.info("Active task: '%s'", nxt["title"])
+                    else:
+                        log.info("No tasks — press T (shift) to add one")
+                except Exception as exc:
+                    log.debug("Task cycle failed: %s", exc)
+            elif key == ord("T"):
+                # new task entry (uppercase / shift+t)
+                if getattr(self, "_task_entry", None) is None:
+                    self._task_entry = {"buffer": ""}
+                    self.settings_visible = False
+            elif key == ord("h"):
+                dest = self.export_history_csv()
+                if dest:
+                    log.info("History exported to %s", dest)
             elif key == 27 and self.layout_edit_mode:
                 self.layout_edit_mode = False
                 self._dragging_element = None
@@ -2351,22 +2661,79 @@ class PomodoroTimer:
         log.info("Settings: Pomodoro=%d min, Break=%d min, Mode=%s", self.session_duration_minutes, self.break_duration_minutes, self.display_mode)
 
     # -- timer state machine ----------------------------------------------
+    def set_task(self, tid: str | None, title: str | None) -> None:
+        """Snapshot which task the current/future phases belong to."""
+        self._current_task_id = tid
+        clean = TaskStore.sanitize_title(title) if title else None
+        self._current_task_title = clean if tid and clean else None
+
+    def sync_task_from_store(self) -> None:
+        try:
+            active = get_tasks().get_active()
+            self.set_task(active["id"] if active else None, active["title"] if active else None)
+        except Exception:
+            pass
+
+    def record_session(self, completed: bool) -> None:
+        """Persist the current phase to history.json with person + task attribution."""
+        if self._phase_start_ms is None:
+            return
+        ended_ms = int(time.time() * 1000)
+        duration_sec = int(round((ended_ms - self._phase_start_ms) / 1000.0))
+        if duration_sec < 5:
+            self._phase_start_ms = None
+            return
+        try:
+            rec: dict[str, Any] = {
+                "phase": str(self.current_phase),
+                "startedAt": self._phase_start_ms,
+                "endedAt": ended_ms,
+                "durationSec": duration_sec,
+                "completed": bool(completed),
+            }
+            if self._focus_count:
+                rec["focusAvg"] = int(round(self._focus_sum / self._focus_count))
+            if self._current_person_label:
+                rec["person"] = self._current_person_label
+            if getattr(self, "_current_task_id", None):
+                rec["taskId"] = self._current_task_id
+            if getattr(self, "_current_task_title", None):
+                rec["taskTitle"] = self._current_task_title
+            get_history().add(rec)
+        except Exception as exc:
+            log.debug("record_session failed: %s", exc)
+        self._phase_start_ms = None
+
+    def export_history_csv(self) -> Path | None:
+        try:
+            dest = get_history().export_csv()
+            log.info("History exported to %s", dest)
+            return dest
+        except Exception as exc:
+            log.warning("History export failed: %s", exc)
+            return None
+
     def start_timer(self) -> None:
         if self.is_running:
             return
         self.is_running = True
         self.phase_started_at = time.time()
+        self._phase_start_ms = int(time.time() * 1000)
+        self._focus_sum = 0.0
+        self._focus_count = 0
         self.phase_duration_seconds = self.break_duration_minutes * 60 if self.current_phase == Phase.SHORT_BREAK else self.session_duration_minutes * 60
         self.time_left = self.phase_duration_seconds
 
     def stop_timer(self) -> None:
         self.is_running = False
         self.phase_started_at = None
+        self.record_session(False)
 
     def toggle_timer(self) -> None:
         self.stop_timer() if self.is_running else self.start_timer()
 
     def reset_timer(self) -> None:
+        self.record_session(False)
         self.is_running = False
         self.phase_started_at = None
         self.current_phase = Phase.POMODORO
@@ -2374,17 +2741,25 @@ class PomodoroTimer:
         self.phase_duration_seconds = self.time_left
 
     def switch_to_short_break(self) -> None:
+        self.record_session(True)
         self.current_phase = Phase.SHORT_BREAK
         self.time_left = self.break_duration_minutes * 60
         self.phase_duration_seconds = self.time_left
         self.phase_started_at = time.time()
+        self._phase_start_ms = int(time.time() * 1000)
+        self._focus_sum = 0.0
+        self._focus_count = 0
         self.is_running = True
 
     def switch_to_pomodoro(self) -> None:
+        self.record_session(True)
         self.current_phase = Phase.POMODORO
         self.time_left = self.session_duration_minutes * 60
         self.phase_duration_seconds = self.time_left
         self.phase_started_at = time.time()
+        self._phase_start_ms = int(time.time() * 1000)
+        self._focus_sum = 0.0
+        self._focus_count = 0
         self.is_running = True
 
     def _update_timer(self) -> None:
@@ -2655,6 +3030,16 @@ class PomodoroTimer:
                 self._live_stats["slacking_frames"] += 1
         except Exception:
             pass
+        # session attribution aggregate (for history.json export)
+        try:
+            self._focus_sum = float(getattr(self, "_focus_sum", 0.0)) + float(score)
+            self._focus_count = int(getattr(self, "_focus_count", 0)) + 1
+            tracks = getattr(self, "person_tracks", [])
+            if tracks:
+                primary = max(tracks, key=lambda p: (p.bbox[2] * p.bbox[3]))
+                self._current_person_label = primary.label or None
+        except Exception:
+            pass
         return score
 
     def classify_focus_state(self, score: float, frame: np.ndarray | None = None) -> str:
@@ -2701,6 +3086,10 @@ class PomodoroTimer:
             self._draw_layout_edit_overlay(frame, theme, rounded, ui_scale)
         if self._name_entry is not None:
             self._draw_name_entry(frame, theme, rounded, ui_scale)
+        if getattr(self, "_task_entry", None) is not None:
+            self._draw_task_entry(frame, theme, rounded, ui_scale)
+        else:
+            self._draw_task_chip(frame, theme, rounded, ui_scale)
         if self.onboarding.active:
             self.onboarding.draw_overlay(frame, theme, rounded, ui_scale)
         return frame
@@ -3019,7 +3408,7 @@ class PomodoroTimer:
 
         content_top = divider_y + int(12 * pscale)
         content_bottom = panel_y + panel_h - pad
-        row_h = (content_bottom - content_top) / 10.0
+        row_h = (content_bottom - content_top) / 12.0
         btn_h = int(min(row_h * 0.62, 42 * pscale))
         gap = int(10 * pscale)
         inner_r = panel_x + panel_w - pad
@@ -3067,12 +3456,28 @@ class PomodoroTimer:
         draw_btn("scale_plus", inner_r - stepper_w, cy - btn_h // 2, inner_r, cy + btn_h // 2, "+", bold=True)
         cy = row_cy(8)
         try:
+            _tasks = get_tasks().list()
+            _active = get_tasks().get_active()
+        except Exception:
+            _tasks, _active = [], None
+        _task_label = (_active["title"][:28] if _active else "None") if _active else "None"
+        draw_text(frame, f"Task: {_task_label} ({len(_tasks)} total, T cycle)", panel_x + pad, cy + int(8 * pscale), int(19 * pscale), theme["subtext"], anchor="la")
+        draw_btn("task_next", inner_r - stepper_w * 2 - gap, cy - btn_h // 2, inner_r, cy + btn_h // 2, "Next", bold=False)
+        cy = row_cy(9)
+        try:
+            _hist_n = len(get_history().records)
+        except Exception:
+            _hist_n = 0
+        draw_text(frame, f"History: {_hist_n} sessions (H exports CSV)", panel_x + pad, cy + int(8 * pscale), int(19 * pscale), theme["subtext"], anchor="la")
+        draw_btn("history_export", inner_r - stepper_w * 2 - gap, cy - btn_h // 2, inner_r, cy + btn_h // 2, "Export", bold=False)
+        cy = row_cy(10)
+        try:
             faces = get_gallery().list_identities()
         except Exception:
             faces = []
         draw_text(frame, f"Faces: {len(faces)} remembered (N to rename)", panel_x + pad, cy + int(8 * pscale), int(19 * pscale), theme["subtext"], anchor="la")
         draw_btn("gallery_forget", inner_r - stepper_w * 2 - gap, cy - btn_h // 2, inner_r, cy + btn_h // 2, "Forget", bold=False)
-        cy = row_cy(9)
+        cy = row_cy(11)
         draw_btn("layout_edit_mode", panel_x + pad, cy - btn_h // 2, inner_r, cy + btn_h // 2, "Exit Edit Mode" if self.layout_edit_mode else "Layout Edit Mode", border_color=theme["off_color"] if self.layout_edit_mode else theme["accent"], bold=True)
 
     def _handle_settings_click(self, x: int, y: int) -> None:
@@ -3163,6 +3568,17 @@ class PomodoroTimer:
                             log.info("Gallery cleared — all faces forgotten")
                         except Exception as exc:
                             log.warning("Gallery clear failed: %s", exc)
+                    case "task_next":
+                        try:
+                            nxt = get_tasks().cycle_active()
+                            self.sync_task_from_store()
+                            log.info("Active task: '%s'", nxt["title"] if nxt else "None")
+                        except Exception as exc:
+                            log.warning("Task cycle failed: %s", exc)
+                    case "history_export":
+                        dest = self.export_history_csv()
+                        if dest:
+                            log.info("History exported to %s", dest)
                     case "close":
                         self.settings_visible = False
                 return
@@ -3180,6 +3596,43 @@ class PomodoroTimer:
         radius = int(bh * 0.3) if rounded else 0
         styled_rect(frame, bx1, by1, bx1 + bw, by1 + bh, fill=theme["panel_fill"], border=theme["accent"], thickness=2, radius=radius)
         draw_text(frame, prompt, bx1 + bw // 2, by1 + bh // 2, px, theme["text"], bold=True, anchor="mm")
+
+    def _draw_task_entry(self, frame: np.ndarray, theme: dict[str, Any], rounded: bool, ui_scale: float) -> None:
+        entry = getattr(self, "_task_entry", None)
+        if entry is None:
+            return
+        fw, fh = frame.shape[1], frame.shape[0]
+        prompt = f"New task: {entry['buffer']}_  (Enter ok, Esc cancel)"
+        px = max(12, int(17 * ui_scale))
+        tw, th = text_size(prompt, px, True)
+        bw, bh = tw + 36, th + 22
+        bx1, by1 = (fw - bw) // 2, int(fh * 0.82)
+        radius = int(bh * 0.3) if rounded else 0
+        styled_rect(frame, bx1, by1, bx1 + bw, by1 + bh, fill=theme["panel_fill"], border=theme["accent"], thickness=2, radius=radius)
+        draw_text(frame, prompt, bx1 + bw // 2, by1 + bh // 2, px, theme["text"], bold=True, anchor="mm")
+
+    def _draw_task_chip(self, frame: np.ndarray, theme: dict[str, Any], rounded: bool, ui_scale: float) -> None:
+        try:
+            tid = getattr(self, "_current_task_id", None)
+            title = getattr(self, "_current_task_title", None)
+        except Exception:
+            return
+        if not tid or not title:
+            return
+        if getattr(self, "settings_visible", False) or getattr(self, "layout_edit_mode", False):
+            return
+        fw = frame.shape[1]
+        label = f"[Task] {str(title)[:40]}"
+        px = max(10, int(13 * ui_scale))
+        tw, th = text_size(label, px, True)
+        bw, bh = tw + 20, th + 12
+        bx1, by1 = (fw - bw) // 2, 8
+        if by1 + bh > frame.shape[0]:
+            return
+        radius = int(bh * 0.4) if rounded else 0
+        _alpha_blend_roi(frame, bx1, by1, bx1 + bw, by1 + bh, (28, 28, 32), 0.62, radius)
+        styled_rect(frame, bx1, by1, bx1 + bw, by1 + bh, border=theme["accent"], thickness=1, radius=radius)
+        draw_text(frame, label, bx1 + bw // 2, by1 + bh // 2, px, theme["text"], bold=True, anchor="mm")
 
     def _cycle_layout_preset(self) -> None:
         # all presets are minimalist — no center Pomodoro, safe timer, thin progress, subtle focus

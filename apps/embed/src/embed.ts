@@ -228,7 +228,7 @@ kbd {
 const WIDGET_HTML = `
 <div class="widget">
   <header class="topbar">
-    <div class="brand">🍅 Pomodoro Camera</div>
+    <div class="brand">🍅 Pomodoro Camera <span id="active-task" style="font-size:12px;font-weight:400;opacity:0.8"></span></div>
     <div class="topbar-actions">
       <button id="btn-start" class="btn btn-accent">Start</button>
       <button id="btn-reset" class="btn">Reset</button>
@@ -329,6 +329,18 @@ const WIDGET_HTML = `
         <button type="button" data-action="layout-preset" class="btn btn-small">Presets</button>
         <button type="button" data-action="layout-reset" class="btn btn-small">Default</button>
         <button type="button" data-action="layout-grid" class="btn btn-small" id="btn-grid">Grid: 12×8</button>
+      </div>
+      <div class="field" style="flex-direction:column;align-items:stretch">
+        <span>Tasks · <span id="task-count">None yet</span></span>
+        <div class="row" style="margin:4px 0">
+          <input type="text" id="task-input" maxlength="60" placeholder="New task" aria-label="New task title" style="flex:1;min-width:0;padding:5px 8px;border-radius:8px;border:1px solid var(--divider);background:var(--panel);color:var(--text);font-size:12px" />
+          <button type="button" data-action="task-add" class="btn btn-small">Add</button>
+        </div>
+        <select id="task-select" aria-label="Active task" style="width:100%;margin-top:4px;padding:5px 8px;border-radius:8px;border:1px solid var(--divider);background:var(--panel);color:var(--text);font-size:12px"></select>
+        <div id="task-list" style="width:100%"></div>
+        <div class="row" style="margin-top:8px">
+          <button type="button" data-action="task-clear-done" class="btn btn-small">Clear completed</button>
+        </div>
       </div>
       <div class="field" style="flex-direction:column;align-items:stretch">
         <span>Faces · <span id="gallery-count">None yet</span></span>

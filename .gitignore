@@ -2,6 +2,9 @@
 layout.json
 settings.json
 gallery.json
+tasks.json
+history.json
+history.csv
 __pycache__/
 *.pyc
 *.pyo

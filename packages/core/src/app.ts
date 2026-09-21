@@ -8,6 +8,7 @@ import { VisionEngine } from "./vision.ts";
 import { OnboardingManager } from "./onboarding.ts";
 import { styledRect, drawXpProgressBar, drawXpTitleBar } from "./render.ts";
 import { getHistory } from "./history.ts";
+import { getTasks } from "./tasks.ts";
 
 // DOM refs — injected by main.ts or embed.ts (shadow DOM)
 export interface AppDeps {
@@ -65,6 +66,11 @@ export class PomodoroApp {
     this.root = (deps.root ?? document) as ParentNode & { getElementById?(id: string): HTMLElement | null };
     this.hostEl = deps.host ?? document.documentElement;
 
+    // restore active task into the timer so new sessions are attributed
+    try {
+      const active = getTasks().getActive();
+      if (active) this.timer.setTask(active.id, active.title);
+    } catch {}
     this.bindSettingsUI();
     this.bindOnboardingUI();
     this.bindTopbar();
@@ -153,6 +159,8 @@ export class PomodoroApp {
 
   bindKeys(): void {
     window.addEventListener("keydown", (e) => {
+      const ae = document.activeElement as HTMLElement | null;
+      if (ae && (ae.tagName === "INPUT" || ae.tagName === "TEXTAREA" || ae.tagName === "SELECT")) return;
       if (this.onboarding.active) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.timer.unlockAudio(); this.onboarding.next(); if (!this.onboarding.active) this.timer.saveSettings(); this.renderOnboarding(); }
         else if (e.key === "Backspace") { this.onboarding.back(); this.renderOnboarding(); }
@@ -163,6 +171,7 @@ export class PomodoroApp {
       if (k === "s") { this.timer.unlockAudio(); this.timer.toggleTimer(); }
       else if (k === "e") this.toggleEditMode();
       else if (k === "q") this.timer.stopTimer();
+      else if (k === "t") this.cycleTask();
       else if (k === "escape" && this.layoutEditMode) this.toggleEditMode(false);
     });
     // Unlock audio on any first interaction (required by autoplay policy)
@@ -269,7 +278,56 @@ export class PomodoroApp {
     bind("export-json", () => this.exportHistory("json"));
     bind("export-csv", () => this.exportHistory("csv"));
     bind("clear-history", () => { if (confirm("Clear all history?")) { this.clearHistory(); } });
+    bind("task-add", () => this.addTaskFromInput());
+    bind("task-clear-done", () => { try { getTasks().clearCompleted(); this.syncTaskToTimer(); } catch {} this.syncSettingsUI(); });
     bind("gallery-clear", () => { if (confirm("Forget all remembered faces?")) { this.vision.gallery.clear(); this.syncSettingsUI(); this.showToast("All faces forgotten"); } });
+    // task input: Enter to add
+    dlg.querySelector("#task-input")?.addEventListener("keydown", (e) => {
+      if ((e as KeyboardEvent).key === "Enter") { e.preventDefault(); this.addTaskFromInput(); }
+    });
+    // task active selector
+    dlg.querySelector("#task-select")?.addEventListener("change", (e) => {
+      const sel = e.target as HTMLSelectElement;
+      try {
+        getTasks().setActive(sel.value || null);
+        this.syncTaskToTimer();
+      } catch {}
+      this.syncSettingsUI();
+    });
+    // task rename inputs — delegated for dynamic rows
+    dlg.addEventListener("change", (e) => {
+      const el = e.target as HTMLElement | null;
+      if (el?.matches?.("input.task-rename")) {
+        const id = (el as HTMLInputElement).dataset.id;
+        if (id) {
+          try {
+            const title = getTasks().rename(id, (el as HTMLInputElement).value);
+            if (title !== null) this.syncTaskToTimer();
+          } catch {}
+          this.syncSettingsUI();
+        }
+      }
+    });
+    dlg.addEventListener("click", (e) => {
+      const toggle = (e.target as HTMLElement | null)?.closest?.("[data-task-toggle]") as HTMLElement | null;
+      if (toggle) {
+        const id = toggle.getAttribute("data-task-toggle");
+        if (id) {
+          try { getTasks().toggleDone(id); this.syncTaskToTimer(); } catch {}
+          this.syncSettingsUI();
+        }
+        return;
+      }
+      const del = (e.target as HTMLElement | null)?.closest?.("[data-task-delete]") as HTMLElement | null;
+      if (del) {
+        const id = del.getAttribute("data-task-delete");
+        if (id) {
+          try { getTasks().remove(id); this.syncTaskToTimer(); } catch {}
+          this.syncSettingsUI();
+        }
+        return;
+      }
+    });
     // gallery rename (text inputs) + per-face forget buttons — delegated for dynamic rows
     dlg.addEventListener("change", (e) => {
       const el = e.target as HTMLElement | null;
@@ -362,6 +420,32 @@ export class PomodoroApp {
     this.renderHistoryStats();
     this.renderFocusChart();
     this.renderGalleryList();
+    this.renderTaskList();
+    this.updateTopbarLabels();
+  }
+
+  private syncTaskToTimer(): void {
+    try {
+      const active = getTasks().getActive();
+      if (active) this.timer.setTask(active.id, active.title);
+      else this.timer.setTask(null, null);
+    } catch {}
+  }
+
+  private addTaskFromInput(): void {
+    const input = this.deps.settingsDialog.querySelector("#task-input") as HTMLInputElement | null;
+    if (!input) return;
+    const title = input.value;
+    if (!title.trim()) return;
+    try {
+      const t = getTasks().add(title);
+      if (t) {
+        input.value = "";
+        this.syncTaskToTimer();
+        this.showToast(`Task added: ${t.title}`);
+      }
+    } catch {}
+    this.syncSettingsUI();
   }
 
   private renderHistoryStats(): void {
@@ -369,7 +453,12 @@ export class PomodoroApp {
     if (!el) return;
     try {
       const s = getHistory().getStats();
-      el.textContent = `Today: ${s.todayPomodoros} pomodoros \u00B7 Focus ${s.todayFocusAvg}% \u00B7 Streak ${s.streak} \u00B7 Total ${s.totalPomodoros}`;
+      let txt = `Today: ${s.todayPomodoros} pomodoros \u00B7 Focus ${s.todayFocusAvg}% \u00B7 Streak ${s.streak} \u00B7 Total ${s.totalPomodoros}`;
+      try {
+        const active = getTasks().getActive();
+        if (active) txt += ` \u00B7 Task: ${active.title}`;
+      } catch {}
+      el.textContent = txt;
     } catch {
       try {
         const raw = localStorage.getItem("pomodoro.history.v1");
@@ -425,7 +514,15 @@ export class PomodoroApp {
     let content = "", mime = "application/json", ext = "json";
     try {
       const h = getHistory();
-      content = format === "csv" ? h.exportCSV() : h.exportJSON();
+      if (format === "csv") {
+        content = h.exportCSV();
+      } else {
+        let tasks: { id: string; title: string; done: boolean; createdAt: number; completedAt?: number }[] | undefined;
+        try {
+          tasks = getTasks().list();
+        } catch {}
+        content = h.exportJSON(tasks);
+      }
       mime = format === "csv" ? "text/csv" : "application/json";
       ext = format;
     } catch {
@@ -499,6 +596,86 @@ export class PomodoroApp {
       forget.setAttribute("aria-label", `Forget ${info.label}`);
       forget.textContent = "Forget";
       row.append(badge, input, liveDot, forget);
+      box.appendChild(row);
+    }
+  }
+
+  private renderTaskList(): void {
+    const box = this.deps.settingsDialog.querySelector("#task-list") as HTMLElement | null;
+    const select = this.deps.settingsDialog.querySelector("#task-select") as HTMLSelectElement | null;
+    const countEl = this.deps.settingsDialog.querySelector("#task-count") as HTMLElement | null;
+    if (!box && !select) return;
+    let tasks: { id: string; title: string; done: boolean; createdAt: number }[] = [];
+    let activeId: string | null = null;
+    try {
+      const store = getTasks();
+      tasks = store.list();
+      activeId = store.activeId;
+    } catch {}
+    if (countEl) {
+      const open = tasks.filter((t) => !t.done).length;
+      countEl.textContent = tasks.length ? `${open} open · ${tasks.length} total` : "None yet";
+    }
+    if (select) {
+      const prev = activeId ?? "";
+      select.replaceChildren();
+      const none = document.createElement("option");
+      none.value = "";
+      none.textContent = "No task (general)";
+      select.appendChild(none);
+      for (const t of tasks) {
+        const opt = document.createElement("option");
+        opt.value = t.id;
+        opt.textContent = `${t.done ? "✓ " : ""}${t.title}`;
+        select.appendChild(opt);
+      }
+      select.value = prev;
+    }
+    if (!box) return;
+    box.replaceChildren();
+    if (!tasks.length) {
+      const empty = document.createElement("div");
+      empty.style.cssText = "font-size:12px;color:var(--subtext);margin:4px 0";
+      empty.textContent = "No tasks yet — add one above, then sessions attach to the active task.";
+      box.appendChild(empty);
+      return;
+    }
+    let counts = new Map<string, { title: string; pomodoros: number }>();
+    try {
+      counts = getHistory().countByTask();
+    } catch {}
+    for (const t of tasks) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:6px;margin:4px 0";
+      const check = document.createElement("button");
+      check.type = "button";
+      check.className = "btn btn-small";
+      check.setAttribute("data-task-toggle", t.id);
+      check.setAttribute("aria-label", t.done ? `Reopen ${t.title}` : `Complete ${t.title}`);
+      check.textContent = t.done ? "✓" : "○";
+      check.style.cssText = "min-width:32px";
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "task-rename";
+      input.dataset.id = t.id;
+      input.maxLength = 60;
+      input.value = t.title;
+      input.setAttribute("aria-label", `Title for task ${t.title}`);
+      input.style.cssText = "flex:1;min-width:0;padding:5px 8px;border-radius:8px;border:1px solid var(--divider);background:var(--panel);color:var(--text);font-size:12px" + (t.done ? ";text-decoration:line-through;opacity:0.6" : "");
+      const badge = document.createElement("span");
+      badge.style.cssText = "font-size:11px;color:var(--subtext);white-space:nowrap;min-width:5ch;text-align:right";
+      const n = counts.get(t.id)?.pomodoros ?? 0;
+      badge.textContent = n ? `${n} 🍅` : "";
+      if (t.id === activeId) {
+        badge.textContent = (badge.textContent ? badge.textContent + " " : "") + "●";
+      }
+      const del = document.createElement("button");
+      del.type = "button";
+      del.className = "btn btn-small";
+      del.setAttribute("data-task-delete", t.id);
+      del.setAttribute("aria-label", `Delete ${t.title}`);
+      del.textContent = "✕";
+      row.append(check, input, badge, del);
       box.appendChild(row);
     }
   }
@@ -914,11 +1091,37 @@ export class PomodoroApp {
     this.ctx.restore();
   }
 
+  /** Cycle active task to the next open task (T shortcut). */
+  cycleTask(): void {
+    try {
+      const store = getTasks();
+      const open = store.list().filter((t) => !t.done);
+      if (!open.length) {
+        this.showToast("No tasks — add one in Settings");
+        return;
+      }
+      const idx = open.findIndex((t) => t.id === store.activeId);
+      const next = open[(idx + 1) % open.length]!;
+      store.setActive(next.id);
+      this.syncTaskToTimer();
+      this.syncSettingsUI();
+      this.showToast(`Task: ${next.title}`);
+    } catch {}
+  }
+
   private updateTopbarLabels(): void {
     const startBtn = this.qs<HTMLButtonElement>("btn-start");
     if (startBtn) startBtn.textContent = this.timer.isRunning ? "Running" : "Start";
     const editBtn = this.qs<HTMLButtonElement>("btn-edit");
     if (editBtn) editBtn.textContent = this.layoutEditMode ? "Exit Edit" : "Edit Layout (E)";
+    try {
+      const chip = this.qs<HTMLElement>("active-task");
+      if (chip) {
+        const active = getTasks().getActive();
+        chip.textContent = active ? `🍅 ${active.title}` : "";
+        chip.style.display = active ? "" : "none";
+      }
+    } catch {}
   }
 
   private visionBusy = false;
