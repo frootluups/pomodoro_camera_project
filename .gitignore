@@ -1,6 +1,7 @@
 # generated at runtime (matches apps/python/layout.json, apps/python/settings.json, etc.)
 layout.json
 settings.json
+gallery.json
 __pycache__/
 *.pyc
 *.pyo

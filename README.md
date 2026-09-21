@@ -11,6 +11,7 @@ Focus-aware Pomodoro timer in a single OpenCV window. Combines a 25/5 timer with
 - **Pomodoro engine** — 25 min work → 5 min break, auto flip, pause/resume/reset
 - **Camera focus scoring** — Haar face detection (every 3rd frame) + motion diff → 0-100 score → `concentrated / neutral / slacking`
 - **Face tracking outline** — smoothed, color-coded corner-bracket box with `SLACKING` tag
+- **Face re-ID gallery** — persistent per-person identities (HSV hist + optional SFace), custom names, per-session attribution in history export
 - **Slacking alerts** — pulsing banner + window border + beep (throttled, toggle in Settings)
 - **TrueType text** — Segoe UI via Pillow, Hershey fallback, cached sizing, binary-search `fit_text`
 - **Layout system** — 12×8 grid, top-left cells, drag-and-drop edit (`E` / `Esc`), presets (Default / Focus / Dashboard / Minimal), `layout.json` persistence
@@ -116,6 +117,7 @@ import { mountPomodoro } from "pomodoro-camera-web/embed";
 |---|---|
 | `S` | start / pause timer |
 | `E` | toggle layout edit mode |
+| `N` | name primary face (Python window; Settings → Faces on web) |
 | `Esc` | exit edit mode (also skip onboarding) |
 | `Q` / window `X` | quit |
 | `Enter` / `Space` | onboarding next |
@@ -126,6 +128,7 @@ import { mountPomodoro } from "pomodoro-camera-web/embed";
 
 - `apps/python/layout.json` / `localStorage:pomodoro.layout.v1` — grid positions for `timer_popup`, `phase_label`, `progress_bar`, `focus_display`, `status_display`, `main_buttons`, `quit_hint`; auto-created, merged on update, healed if corrupt
 - `apps/python/settings.json` / `localStorage:pomodoro.settings.v1` — `ui_scale`, `theme`, `corner_style`, `alerts_enabled`; written on change / onboarding finish
+- `apps/python/gallery.json` / `localStorage:pomodoro.gallery.v1` — face re-ID embeddings + custom names; rename in Settings (web) or `N` key (Python), `Forget` to remove
 
 Delete either file (or clear localStorage) to reset to defaults.
 
@@ -212,7 +215,6 @@ See `apps/python/tests/test_render.py` and `apps/python/tests/test_layout.py`.
 
 ## Future Improvements
 
-- Advanced face recognition re-ID (SFace/gallery already stubbed in `packages/core/src/gallery.ts`)
 - Audio-based focus detection
 - ML attention prediction, eye movement / blink rate
 - Multiple cameras, user profiles / habit tracking

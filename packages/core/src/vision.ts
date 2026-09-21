@@ -25,8 +25,10 @@ async function getBlazeModel() {
       const m = await blazeface.load();
       blazeModel = m as unknown as typeof blazeModel;
       return blazeModel;
-    } catch { return null; }
-    finally { blazeLoading = null; }
+    } catch (err) {
+      console.warn("PomodoroCamera: BlazeFace model failed to load — face detection disabled (check network access to tfhub.dev):", err);
+      return null;
+    } finally { blazeLoading = null; }
   })();
   return blazeLoading;
 }

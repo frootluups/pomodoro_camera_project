@@ -10,11 +10,13 @@ Controls:
     q / window X  quit
     s             start / pause timer
     e             toggle layout edit mode
+    n             name the primary tracked face (type + Enter, Esc cancels)
     Esc           exit edit mode / skip onboarding
 
 Persistence:
     layout.json   grid positions for UI tiles
     settings.json theme, scale, alerts, corner style
+    gallery.json  face re-ID embeddings + custom names (auto-created)
 """
 
 from __future__ import annotations
@@ -65,6 +67,8 @@ DEFAULT_WINDOW_H: Final = 600
 _APP_DIR: Final = Path(__file__).parent
 LAYOUT_FILE: Final = _APP_DIR / "layout.json"
 SETTINGS_FILE: Final = _APP_DIR / "settings.json"
+GALLERY_FILE: Final = _APP_DIR / "gallery.json"
+GALLERY_NAME_MAX: Final = 24
 CASCADE_FILE: Final = "haarcascade_frontalface_default.xml"
 EYE_CASCADE_FILE: Final = "haarcascade_eye.xml"
 
@@ -271,14 +275,22 @@ class MultiPersonTracker:
 class FaceGallery:
     """Long-term re-identification gallery. Stores per-person embeddings (HSV hist or SFace)."""
 
-    def __init__(self, thresh: float = 0.62, max_gallery: int = 12) -> None:
+    def __init__(self, thresh: float = 0.62, max_gallery: int = 12, gallery_file: Path | None = None) -> None:
         self.thresh = thresh
         self.max_gallery = max_gallery
         self.entries: dict[int, np.ndarray] = {}  # pid -> embedding (hist 3*32 or SFace 128)
         self.names: dict[int, str] = {}
+        self.gallery_file: Path = gallery_file or GALLERY_FILE
         self._sface: Any | None = None
         self._sface_ok: bool = False
         self._try_load_sface()
+        self.load()
+
+    @staticmethod
+    def sanitize_name(name: str) -> str | None:
+        """Trim/collapse whitespace, cap length. Blank → None (reset to default label)."""
+        clean = " ".join(str(name).split())[:GALLERY_NAME_MAX]
+        return clean or None
 
     def _try_load_sface(self) -> None:
         try:
@@ -370,7 +382,93 @@ class FaceGallery:
             self.names.pop(oldest, None)
         self.entries[pid] = emb
         if name:
-            self.names[pid] = name
+            clean = self.sanitize_name(name)
+            if clean:
+                self.names[pid] = clean
+        self.save()
+
+    def rename(self, pid: int, name: str) -> str:
+        """Rename a known identity; blank resets to the default label. Persists. Returns the label."""
+        clean = self.sanitize_name(name)
+        if clean:
+            self.names[pid] = clean
+        else:
+            self.names.pop(pid, None)
+        self.save()
+        return self.label(pid)
+
+    def remove(self, pid: int) -> bool:
+        """Forget one identity (embedding + name). Persists. Returns True if anything was removed."""
+        had = self.entries.pop(pid, None) is not None
+        self.names.pop(pid, None)
+        if had:
+            self.save()
+        return had
+
+    def clear(self) -> None:
+        """Forget all identities and remove the persisted file."""
+        self.entries.clear()
+        self.names.clear()
+        try:
+            self.gallery_file.unlink(missing_ok=True)
+        except Exception as exc:
+            log.debug("Gallery clear failed: %s", exc)
+
+    def list_identities(self) -> list[tuple[int, str]]:
+        """Sorted (pid, label) pairs for settings UI — includes named-but-unenrolled pids."""
+        pids = sorted(set(self.entries.keys()) | set(self.names.keys()))
+        return [(pid, self.label(pid)) for pid in pids]
+
+    def save(self) -> None:
+        """Persist embeddings (rounded) + names to gallery.json. Best-effort, never raises."""
+        try:
+            entries = {str(pid): [round(float(v), 4) for v in emb.flatten().tolist()] for pid, emb in self.entries.items()}
+            self.gallery_file.write_text(json.dumps({"version": 1, "entries": entries, "names": {str(k): v for k, v in self.names.items()}}, indent=2), encoding="utf-8")
+        except Exception as exc:
+            log.debug("Gallery save failed: %s", exc)
+
+    def load(self) -> None:
+        """Load persisted embeddings + names. Corrupt entries are skipped, never raises."""
+        try:
+            if not self.gallery_file.exists():
+                return
+            data = json.loads(self.gallery_file.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or data.get("version") != 1:
+                return
+            raw_entries = data.get("entries")
+            if isinstance(raw_entries, dict):
+                for k, arr in raw_entries.items():
+                    try:
+                        pid = int(k)
+                    except (TypeError, ValueError):
+                        continue
+                    if pid < 0 or not isinstance(arr, list) or len(arr) not in (48, 128):
+                        continue
+                    try:
+                        emb = np.asarray(arr, dtype=np.float32).flatten()
+                    except (TypeError, ValueError):
+                        continue
+                    if emb.size not in (48, 128) or not np.all(np.isfinite(emb)):
+                        continue
+                    self.entries[pid] = emb
+                while len(self.entries) > self.max_gallery:
+                    oldest = min(self.entries.keys())
+                    del self.entries[oldest]
+                    self.names.pop(oldest, None)
+            raw_names = data.get("names")
+            if isinstance(raw_names, dict):
+                for k, n in raw_names.items():
+                    try:
+                        pid = int(k)
+                    except (TypeError, ValueError):
+                        continue
+                    if pid < 0 or not isinstance(n, str):
+                        continue
+                    clean = self.sanitize_name(n)
+                    if clean:
+                        self.names[pid] = clean
+        except Exception as exc:
+            log.warning("Gallery load failed: %s", exc)
 
     def label(self, pid: int) -> str:
         return self.names.get(pid, f"Person #{pid}")
@@ -1488,6 +1586,8 @@ class PomodoroTimer:
         self._alert_active: bool = False
         self._face_frame_count: int = 0
         self._last_gray: np.ndarray | None = None
+        # in-window naming: None = idle, otherwise {"gid": int, "buffer": str}
+        self._name_entry: dict[str, Any] | None = None
 
         self._load_settings()
 
@@ -1657,7 +1757,7 @@ class PomodoroTimer:
                         eye_suffix = " 👁" if eye_ok2 else " ○"
                 except Exception:
                     pass
-                pid_text = f"#{person.pid}{eye_suffix}"
+                pid_text = f"{person.label or f'Person #{person.gid or person.pid}'}{eye_suffix}"
                 # hide verbose G mapping in minimalist mode — keep clean
                 pid_px = max(9, int(bh * 0.095))
                 tw, th = text_size(pid_text, pid_px, True)
@@ -2109,6 +2209,26 @@ class PomodoroTimer:
                 elif key == 27:
                     self.onboarding.active = False
                     self._save_settings()
+            elif self._name_entry is not None:
+                entry = self._name_entry
+                if key in (13, 10):  # Enter — confirm
+                    try:
+                        gallery = get_gallery()
+                        label = gallery.rename(int(entry["gid"]), str(entry["buffer"]))
+                        for trk in self.person_tracks:
+                            if (trk.gid or trk.pid) == int(entry["gid"]):
+                                trk.label = label
+                        log.info("Face #%s named '%s'", entry["gid"], label)
+                    except Exception as exc:
+                        log.warning("Rename failed: %s", exc)
+                    self._name_entry = None
+                elif key == 27:  # Esc — cancel
+                    self._name_entry = None
+                elif key in (8, 127):  # Backspace
+                    entry["buffer"] = str(entry["buffer"])[:-1]
+                elif 32 <= key <= 126 and key != 255:
+                    if len(str(entry["buffer"])) < GALLERY_NAME_MAX:
+                        entry["buffer"] = str(entry["buffer"]) + chr(key)
             elif key == ord("q"):
                 self.session_open = False
             elif key == ord("s"):
@@ -2120,6 +2240,18 @@ class PomodoroTimer:
                     self.settings_visible = False
                 else:
                     self._save_layout()
+            elif key == ord("n"):
+                # name the primary (largest) tracked face — type + Enter, Esc cancels
+                if self._name_entry is None and getattr(self, "person_tracks", None):
+                    try:
+                        primary = max(self.person_tracks, key=lambda p: (p.bbox[2] * p.bbox[3]))
+                        gid = primary.gid if primary.gid is not None else primary.pid
+                        gallery = get_gallery()
+                        current = gallery.names.get(gid, "")
+                        self._name_entry = {"gid": gid, "buffer": current}
+                        self.settings_visible = False
+                    except Exception as exc:
+                        log.debug("Name entry failed: %s", exc)
             elif key == 27 and self.layout_edit_mode:
                 self.layout_edit_mode = False
                 self._dragging_element = None
@@ -2437,11 +2569,11 @@ class PomodoroTimer:
                             trk.label = gallery.label(trk.pid)
                             used_gids.add(trk.pid)
                     else:
-                        trk.label = f"Person #{trk.pid}"
+                        trk.label = gallery.label(trk.pid)
                         used_gids.add(trk.pid)
                 else:
                     if not trk.label:
-                        trk.label = gallery.label(trk.gid) if trk.gid else f"Person #{trk.pid}"
+                        trk.label = gallery.label(trk.gid) if trk.gid is not None else gallery.label(trk.pid)
                     if trk.gid is not None:
                         used_gids.add(trk.gid)
                     if trk.hits % 30 == 0:
@@ -2450,7 +2582,7 @@ class PomodoroTimer:
                             gallery.enroll(trk.gid or trk.pid, emb)
             for trk in self.person_tracks:
                 if not trk.label:
-                    trk.label = f"Person #{trk.pid}"
+                    trk.label = gallery.label(trk.gid) if trk.gid is not None else gallery.label(trk.pid)
             self.person_count = len(self.person_tracks)
             self.last_faces = [t.bbox for t in self.person_tracks]
             self._last_gray = gray_small
@@ -2567,6 +2699,8 @@ class PomodoroTimer:
             self._draw_settings_panel(frame)
         if self.layout_edit_mode:
             self._draw_layout_edit_overlay(frame, theme, rounded, ui_scale)
+        if self._name_entry is not None:
+            self._draw_name_entry(frame, theme, rounded, ui_scale)
         if self.onboarding.active:
             self.onboarding.draw_overlay(frame, theme, rounded, ui_scale)
         return frame
@@ -2885,7 +3019,7 @@ class PomodoroTimer:
 
         content_top = divider_y + int(12 * pscale)
         content_bottom = panel_y + panel_h - pad
-        row_h = (content_bottom - content_top) / 9.0
+        row_h = (content_bottom - content_top) / 10.0
         btn_h = int(min(row_h * 0.62, 42 * pscale))
         gap = int(10 * pscale)
         inner_r = panel_x + panel_w - pad
@@ -2932,6 +3066,13 @@ class PomodoroTimer:
         draw_btn("scale_minus", inner_r - 2 * stepper_w - gap, cy - btn_h // 2, inner_r - stepper_w - gap, cy + btn_h // 2, "-", bold=True)
         draw_btn("scale_plus", inner_r - stepper_w, cy - btn_h // 2, inner_r, cy + btn_h // 2, "+", bold=True)
         cy = row_cy(8)
+        try:
+            faces = get_gallery().list_identities()
+        except Exception:
+            faces = []
+        draw_text(frame, f"Faces: {len(faces)} remembered (N to rename)", panel_x + pad, cy + int(8 * pscale), int(19 * pscale), theme["subtext"], anchor="la")
+        draw_btn("gallery_forget", inner_r - stepper_w * 2 - gap, cy - btn_h // 2, inner_r, cy + btn_h // 2, "Forget", bold=False)
+        cy = row_cy(9)
         draw_btn("layout_edit_mode", panel_x + pad, cy - btn_h // 2, inner_r, cy + btn_h // 2, "Exit Edit Mode" if self.layout_edit_mode else "Layout Edit Mode", border_color=theme["off_color"] if self.layout_edit_mode else theme["accent"], bold=True)
 
     def _handle_settings_click(self, x: int, y: int) -> None:
@@ -3016,9 +3157,29 @@ class PomodoroTimer:
                             self.settings_visible = False
                         else:
                             self._save_layout()
+                    case "gallery_forget":
+                        try:
+                            get_gallery().clear()
+                            log.info("Gallery cleared — all faces forgotten")
+                        except Exception as exc:
+                            log.warning("Gallery clear failed: %s", exc)
                     case "close":
                         self.settings_visible = False
                 return
+
+    def _draw_name_entry(self, frame: np.ndarray, theme: dict[str, Any], rounded: bool, ui_scale: float) -> None:
+        entry = getattr(self, "_name_entry", None)
+        if entry is None:
+            return
+        fw, fh = frame.shape[1], frame.shape[0]
+        prompt = f"Name face #{entry['gid']}: {entry['buffer']}_  (Enter ok, Esc cancel)"
+        px = max(12, int(17 * ui_scale))
+        tw, th = text_size(prompt, px, True)
+        bw, bh = tw + 36, th + 22
+        bx1, by1 = (fw - bw) // 2, int(fh * 0.82)
+        radius = int(bh * 0.3) if rounded else 0
+        styled_rect(frame, bx1, by1, bx1 + bw, by1 + bh, fill=theme["panel_fill"], border=theme["accent"], thickness=2, radius=radius)
+        draw_text(frame, prompt, bx1 + bw // 2, by1 + bh // 2, px, theme["text"], bold=True, anchor="mm")
 
     def _cycle_layout_preset(self) -> None:
         # all presets are minimalist — no center Pomodoro, safe timer, thin progress, subtle focus

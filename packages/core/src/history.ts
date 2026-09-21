@@ -7,6 +7,7 @@ export interface SessionRecord {
   durationSec: number;
   completed: boolean;
   focusAvg?: number;
+  person?: string;
 }
 
 export interface FocusSample {
@@ -112,9 +113,9 @@ export class HistoryStore {
   }
 
   exportCSV(): string {
-    const header = "id,phase,startedAt,endedAt,durationSec,completed,focusAvg";
+    const header = "id,phase,startedAt,endedAt,durationSec,completed,focusAvg,person";
     const rows = this.records.map((r) =>
-      [r.id, r.phase, new Date(r.startedAt).toISOString(), new Date(r.endedAt).toISOString(), r.durationSec, r.completed, r.focusAvg ?? ""].join(",")
+      [r.id, r.phase, new Date(r.startedAt).toISOString(), new Date(r.endedAt).toISOString(), r.durationSec, r.completed, r.focusAvg ?? "", r.person ?? ""].join(",")
     );
     return [header, ...rows].join("\n");
   }

@@ -12,7 +12,7 @@
     <meta property="og:type" content="website" />
     <meta property="og:image" content="/icon-512.png" />
     <meta name="twitter:card" content="summary" />
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://cdn.jsdelivr.net; worker-src 'self' blob:; font-src 'self' data:;" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://cdn.jsdelivr.net https://tfhub.dev https://storage.googleapis.com https://kaggle.com https://*.kaggle.com; worker-src 'self' blob:; font-src 'self' data:;" />
     <meta http-equiv="Permissions-Policy" content="camera=(self), microphone=()" />
     <link rel="manifest" href="/manifest.json" />
     <link rel="icon" href="/icon-192.png" />
@@ -158,6 +158,14 @@
               <button type="button" data-action="export-json" class="btn btn-small">Export JSON</button>
               <button type="button" data-action="export-csv" class="btn btn-small">Export CSV</button>
               <button type="button" data-action="clear-history" class="btn btn-small">Clear</button>
+            </div>
+          </div>
+
+          <div class="field" style="flex-direction:column;align-items:stretch">
+            <span>Faces · <span id="gallery-count">None yet</span></span>
+            <div id="gallery-list" style="width:100%"></div>
+            <div class="row" style="margin-top:8px">
+              <button type="button" data-action="gallery-clear" class="btn btn-small">Forget all faces</button>
             </div>
           </div>
         </div>

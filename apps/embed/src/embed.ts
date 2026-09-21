@@ -330,6 +330,13 @@ const WIDGET_HTML = `
         <button type="button" data-action="layout-reset" class="btn btn-small">Default</button>
         <button type="button" data-action="layout-grid" class="btn btn-small" id="btn-grid">Grid: 12×8</button>
       </div>
+      <div class="field" style="flex-direction:column;align-items:stretch">
+        <span>Faces · <span id="gallery-count">None yet</span></span>
+        <div id="gallery-list" style="width:100%"></div>
+        <div class="row" style="margin-top:8px">
+          <button type="button" data-action="gallery-clear" class="btn btn-small">Forget all faces</button>
+        </div>
+      </div>
     </div>
     <div class="settings-footer">
       <button type="button" data-action="layout-edit" class="btn btn-accent">Layout Edit Mode</button>

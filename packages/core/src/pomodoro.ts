@@ -41,6 +41,8 @@ export class PomodoroTimer {
   private phaseStartMs: number | null = null;
   private focusSum = 0;
   private focusCount = 0;
+  /** Gallery label of the primary tracked person in the current phase (for history attribution). */
+  currentPersonLabel: string | null = null;
 
   constructor(sessionMin = POMODORO_MIN_DEFAULT, breakMin = BREAK_MIN_DEFAULT, mode: string = DisplayMode.Both) {
     this.sessionMinutes = sessionMin;
@@ -106,7 +108,7 @@ export class PomodoroTimer {
     this.isRunning = true;
     this.phaseStartedAt = Date.now() / 1000;
     this.phaseStartMs = Date.now();
-    this.focusSum = 0; this.focusCount = 0;
+    this.focusSum = 0; this.focusCount = 0; this.currentPersonLabel = null;
     this.phaseDurationSec = this.phaseDurationFor(this.currentPhase);
     this.timeLeft = this.phaseDurationSec;
     this.emitPhase();
@@ -146,6 +148,11 @@ export class PomodoroTimer {
     this.focusSum += score; this.focusCount++;
   }
 
+  /** Track which gallery identity is in front of the camera (called per vision tick). */
+  setPerson(label: string | null): void {
+    this.currentPersonLabel = label && label.trim() ? label.trim().slice(0, 24) : null;
+  }
+
   private recordSession(completed: boolean): void {
     if (this.phaseStartMs === null) return;
     const endedAt = Date.now();
@@ -156,6 +163,7 @@ export class PomodoroTimer {
         phase: this.currentPhase as "pomodoro" | "short_break" | "long_break",
         startedAt: this.phaseStartMs, endedAt, durationSec, completed,
         ...(this.focusCount ? { focusAvg: Math.round(this.focusSum / this.focusCount) } : {}),
+        ...(this.currentPersonLabel ? { person: this.currentPersonLabel } : {}),
       };
       getHistory().add(rec);
     } catch {
@@ -163,7 +171,7 @@ export class PomodoroTimer {
         const key = "pomodoro.history.v1";
         const raw = localStorage.getItem(key);
         const arr = raw ? JSON.parse(raw) as unknown[] : [];
-        (arr as unknown[]).push({ id: Math.random().toString(36).slice(2, 9), phase: this.currentPhase, startedAt: this.phaseStartMs, endedAt, durationSec, completed, focusAvg: this.focusCount ? Math.round(this.focusSum / this.focusCount) : undefined });
+        (arr as unknown[]).push({ id: Math.random().toString(36).slice(2, 9), phase: this.currentPhase, startedAt: this.phaseStartMs, endedAt, durationSec, completed, focusAvg: this.focusCount ? Math.round(this.focusSum / this.focusCount) : undefined, person: this.currentPersonLabel ?? undefined });
         localStorage.setItem(key, JSON.stringify((arr as unknown[]).slice(-500)));
       } catch {}
     }

@@ -269,6 +269,34 @@ export class PomodoroApp {
     bind("export-json", () => this.exportHistory("json"));
     bind("export-csv", () => this.exportHistory("csv"));
     bind("clear-history", () => { if (confirm("Clear all history?")) { this.clearHistory(); } });
+    bind("gallery-clear", () => { if (confirm("Forget all remembered faces?")) { this.vision.gallery.clear(); this.syncSettingsUI(); this.showToast("All faces forgotten"); } });
+    // gallery rename (text inputs) + per-face forget buttons — delegated for dynamic rows
+    dlg.addEventListener("change", (e) => {
+      const el = e.target as HTMLElement | null;
+      if (el?.matches?.("input.gallery-rename")) {
+        const pid = Number((el as HTMLInputElement).dataset.pid);
+        if (Number.isInteger(pid)) {
+          this.vision.gallery.rename(pid, (el as HTMLInputElement).value);
+          // refresh tracker labels + canvas pills immediately
+          for (const t of this.vision.tracker.active) {
+            if ((t.gid ?? t.pid) === pid) t.label = this.vision.gallery.label(pid);
+          }
+          this.syncSettingsUI();
+        }
+      }
+    });
+    dlg.addEventListener("click", (e) => {
+      const btn = (e.target as HTMLElement | null)?.closest?.("[data-gallery-forget]") as HTMLElement | null;
+      if (!btn) return;
+      const pid = Number(btn.getAttribute("data-gallery-forget"));
+      if (Number.isInteger(pid)) {
+        this.vision.gallery.remove(pid);
+        for (const t of this.vision.tracker.active) {
+          if ((t.gid ?? t.pid) === pid) { t.gid = null; t.label = this.vision.gallery.label(t.pid); }
+        }
+        this.syncSettingsUI();
+      }
+    });
     bind("toggle-theme", () => {
       const order: string[] = [ThemeName.Dark, ThemeName.Light, ThemeName.XP];
       const idx = order.indexOf(this.timer.theme); this.timer.theme = order[(idx + 1) % order.length] as typeof this.timer.theme;
@@ -333,6 +361,7 @@ export class PomodoroApp {
     }
     this.renderHistoryStats();
     this.renderFocusChart();
+    this.renderGalleryList();
   }
 
   private renderHistoryStats(): void {
@@ -417,6 +446,61 @@ export class PomodoroApp {
     }
     this.syncSettingsUI();
     this.showToast("History cleared");
+  }
+
+  private renderGalleryList(): void {
+    const box = this.deps.settingsDialog.querySelector("#gallery-list") as HTMLElement | null;
+    if (!box) return;
+    const countEl = this.deps.settingsDialog.querySelector("#gallery-count") as HTMLElement | null;
+    // union of persisted gallery + currently tracked faces (live)
+    const live = new Set<number>();
+    const rows = new Map<number, { label: string; name: string | null }>();
+    try {
+      for (const t of this.vision.tracker.active) {
+        const gid = t.gid ?? t.pid;
+        live.add(gid);
+        rows.set(gid, { label: t.label || this.vision.gallery.label(gid), name: this.vision.gallery.names.get(gid) ?? null });
+      }
+      for (const id of this.vision.gallery.list()) {
+        if (!rows.has(id.pid)) rows.set(id.pid, { label: id.label, name: id.name });
+      }
+    } catch { /* gallery unavailable (e.g. embed without storage) */ }
+    if (countEl) countEl.textContent = rows.size ? `${rows.size} remembered` : "None yet";
+    box.replaceChildren();
+    if (!rows.size) {
+      const empty = document.createElement("div");
+      empty.style.cssText = "font-size:12px;color:var(--subtext);margin:4px 0";
+      empty.textContent = "No faces remembered yet — sit in front of the camera during a session.";
+      box.appendChild(empty);
+      return;
+    }
+    for (const [pid, info] of [...rows.entries()].sort((a, b) => a[0] - b[0])) {
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;gap:6px;margin:4px 0";
+      const badge = document.createElement("span");
+      badge.style.cssText = "font-size:12px;font-weight:700;min-width:3ch";
+      badge.textContent = `#${pid}`;
+      const input = document.createElement("input");
+      input.type = "text";
+      input.className = "gallery-rename";
+      input.dataset.pid = String(pid);
+      input.maxLength = 24;
+      input.placeholder = `Person #${pid}`;
+      input.value = info.name ?? "";
+      input.setAttribute("aria-label", `Name for face ${info.label}`);
+      input.style.cssText = "flex:1;min-width:0;padding:5px 8px;border-radius:8px;border:1px solid var(--divider);background:var(--panel);color:var(--text);font-size:12px";
+      const liveDot = document.createElement("span");
+      liveDot.style.cssText = "font-size:11px;color:var(--subtext);white-space:nowrap";
+      liveDot.textContent = live.has(pid) ? "● live" : "";
+      const forget = document.createElement("button");
+      forget.type = "button";
+      forget.className = "btn btn-small";
+      forget.setAttribute("data-gallery-forget", String(pid));
+      forget.setAttribute("aria-label", `Forget ${info.label}`);
+      forget.textContent = "Forget";
+      row.append(badge, input, liveDot, forget);
+      box.appendChild(row);
+    }
   }
 
   bindOnboardingUI(): void {
@@ -532,7 +616,7 @@ export class PomodoroApp {
   private drawFaceOutlines(fw: number, fh: number, theme: ReturnType<typeof getTheme>, rounded: boolean): void {
     const tracks = this.vision.tracker.active;
     if (!tracks.length && !this.vision.lastFaces.length) return;
-    const list = tracks.length ? tracks : this.vision.lastFaces.map((b, i) => ({ pid: i + 1, bbox: b, smooth: [b[0], b[1], b[0] + b[2], b[1] + b[3]] as [number, number, number, number], color: [120, 160, 255] as [number, number, number], hits: 2, misses: 0, lastUpdate: 0, gid: null, label: `Person #${i + 1}` }));
+    const list = tracks.length ? tracks : this.vision.lastFaces.map((b, i) => ({ pid: i + 1, bbox: b, smooth: [b[0], b[1], b[0] + b[2], b[1] + b[3]] as [number, number, number, number], color: [120, 160, 255] as [number, number, number], hits: 2, misses: 0, lastUpdate: 0, gid: null as number | null, label: this.vision.gallery.label(i + 1) }));
     const vw = this.deps.video.videoWidth || fw, vh = this.deps.video.videoHeight || fh;
     // video is object-fit: cover — compute letterbox mapping (simplified: assume stageInner covers canvas 1:1)
     // For cover, scale = max(fw/vw, fh/vh), offsets center crop
@@ -571,7 +655,7 @@ export class PomodoroApp {
       if (bw > 60 && bh > 60) {
         this.ctx.save();
         this.ctx.font = `700 ${Math.max(9, bh * 0.095)}px 'Segoe UI', sans-serif`;
-        const label = `#${p.pid}${eyeOk ? " 👁" : " ○"}`;
+        const label = `${p.label || `#${p.pid}`}${eyeOk ? " 👁" : " ○"}`;
         const tw = this.ctx.measureText(label).width;
         const px1 = bx1 + 4, py1 = Math.max(0, by1 + 4);
         styledRect(this.ctx, px1 - 3, py1 - 1, px1 + tw + 3, py1 + 14, { fill: [color[0] * 0.38, color[1] * 0.38, color[2] * 0.38] as [number, number, number], radius: 3 });
@@ -891,6 +975,11 @@ export class PomodoroApp {
         this.timer.focusScore = score;
         this.timer.sampleFocus(score);
         this.timer.focusState = this.vision.classify(score, this.timer.isRunning);
+        // attribute the session to the primary gallery identity (for history export)
+        try {
+          const primary = this.vision.tracker.active[0];
+          this.timer.setPerson(primary?.label ?? null);
+        } catch { this.timer.setPerson(null); }
         // emit focus for embed hosts
         try {
           window.dispatchEvent(new CustomEvent("pomodoro:focus", { detail: { score, state: this.timer.focusState } }));
@@ -913,6 +1002,7 @@ export class PomodoroApp {
       }).catch(() => {}).finally(() => { this.visionBusy = false; });
     } else if (!this.timer.cameraEnabled) {
       this.timer.focusState = FocusState.Neutral; this.timer.focusScore = 0;
+      this.timer.setPerson(null);
     }
     this.draw();
   }
